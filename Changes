@@ -1,0 +1,64 @@
+Revision history for Perl extension JavaScript::SpiderMonkey.
+
+0.12 (12/03/2005)
+    (ms) Makefile.PL prerequisite changed from undef to '0'.
+    (ms) Thomas Busch added a check to Makefile.PL to find an already
+         installed JS lib.
+
+0.11 (08/22/2004)
+      * (ms) Added Log::Log4perl dependency in Makefile.PL as suggested
+             by an anonymous posting on rt.cpan.org.
+      * (ms) Added #define for MSC compiler as suggested in
+             https://rt.cpan.org/Ticket/Display.html?id=6984
+      * (ms) Roger Crew <crew@cs.stanford.edu> provided patches for
+             a clean Win32 compile plus README text on installing the dll/so.
+
+0.10  06/20/2004
+      * Nikita Savin <nikita@savin.go2serve.net> provided a patch to 
+        set $@ instead of printing to STDERR in case of a JS error.
+      * Added patch by Chris Blaise <cblaise@esoft.com>:
+          - Different objects can have the same named function. If no
+            object is specified on function_set, it's global.
+      * Log4perl in for debugging
+      * Chris Blaise submitted a patch to have a perl callback return
+        an object to JS. Applied with modifications, longer term we need
+        a solution on how the perl callback tells the JS wrapper what's coming
+        back: A JS string, an object or an integer.
+
+0.09  02/20/2004
+      * Max Maischein added Win32 installation steps in Makefile.PL
+
+0.08  09/19/2002
+      * Doc bug fixed, reported by Yoz Grahame.
+
+0.07  09/14/2002
+      * Release mgmt changed
+
+0.06  07/10/2002
+      * Made M*PL smarter to detect the JS target platform
+
+0.05  06/23/2002
+      * Added installation instructions to README.
+
+0.04  06/23/2002
+      * Added test case for just setter or just getter
+      * Added documentation
+      * Updated todo list
+
+0.03  06/23/2002 
+      * Added setters and getters for properties
+
+0.02  01/20/2002
+      * Fixed properties (get/set)
+
+0.01  01/03/2002
+      * Where it all began.
+
+TODO: 
+      * setters/getters for arrays
+      * Get rid of GLOBAL and the limitation to one instance
+      * getter/setter called every time, callback settings checked
+        at perl level only
+      * Make fixed constants in init() configurable (1000000)
+      * Allow for different contexts
+      * Rethink function names (by_path, function_set etc.)
