@@ -27,8 +27,17 @@ if ($^O ne 'MSWin32') {
     last;
   }
 
-  if (-f "$JSLIBPATH/lib$JSLIBNAME.so") {
-    $JSLIBDIR = $JSLIBPATH;
+  my @OTHER_LIBPATHS = qw{
+    /usr/lib
+    /usr/local/lib
+  };
+
+  foreach my $libpath(@OTHER_LIBPATHS) {
+    if (-f "$libpath/lib$JSLIBNAME.so" ||
+        -f "$libpath/lib$JSLIBNAME.a") {
+      $JSLIBDIR = $libpath;
+      last;
+    }
   }
 
 } else {
