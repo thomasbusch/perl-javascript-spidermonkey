@@ -27,7 +27,7 @@ JSClass global_class = {
     JS_EnumerateStub, JS_ResolveStub,   JS_ConvertStub,   JS_FinalizeStub
 };
 
-static int Debug = 10;
+static int Debug = 0;
 
 /* It's kinda silly that we have to replicate this for getters and setters,
  * but there doesn't seem to be a way to distinguish between getters
@@ -247,7 +247,7 @@ JS_Init(maxbytes)
         }
             /* Replace this by Debug = debug_enabled(); once 
              * Log::Log4perl 0.47 is out */
-        Debug = 1;
+        Debug = 0;
         RETVAL = rt;
     }
     OUTPUT:
