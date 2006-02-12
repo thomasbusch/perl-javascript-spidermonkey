@@ -154,7 +154,8 @@ FunctionDispatcher(JSContext *cx, JSObject *obj, uintN argc,
     count = call_pv("JavaScript::SpiderMonkey::function_dispatcher", G_SCALAR);
     SPAGAIN;
 
-    fprintf(stderr, "DEBUG: Count is %d\n", count);
+    if(Debug)
+        fprintf(stderr, "DEBUG: Count is %d\n", count);
 
     if( count > 0) {
         sv = POPs;        
