@@ -1,9 +1,12 @@
 Revision history for Perl extension JavaScript::SpiderMonkey.
 
-0.14 (12/02/2005)
+0.15 (28/02/2006)
+    (tb) Rewrote Makefile.PL to work on more platforms
+
+0.14 (12/02/2006)
     (tb) Removed remaining debug info
 
-0.13 (05/02/2005)
+0.13 (05/02/2006)
     (tb) Removed debug info
     (tb) Made sure Makefile.PL finds libjs if installed in /usr/lib or 
          /usr/local/lib
