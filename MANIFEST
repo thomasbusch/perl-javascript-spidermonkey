@@ -26,6 +26,9 @@ t/07func.t
 t/08func2.t
 t/09meth.t
 t/10elobj.t
+t/11intret.t
+t/12dblret.t
+t/13strret.t
 t/init.pl
 typemap
 util/download.pl
