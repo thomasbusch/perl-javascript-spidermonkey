@@ -29,7 +29,7 @@ my $doc = $js->object_by_path('document' );
 $js->property_by_path('fooobj.style' );
 $js->function_set( 'getElementById', sub {
     if(exists $JavaScript::SpiderMonkey::GLOBAL->{objects}->{'fooobj'}) {
-        return ${$JavaScript::SpiderMonkey::GLOBAL->{objects}->{'fooobj'}};
+        return $JavaScript::SpiderMonkey::GLOBAL->{objects}->{'fooobj'};
     }
 }, $doc);
 $js->function_set("write", sub { 
