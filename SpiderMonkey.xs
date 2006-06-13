@@ -129,10 +129,13 @@ FunctionDispatcher(JSContext *cx, JSObject *obj, uintN argc,
     jsval *argv, jsval *rval) {
 /* --------------------------------------------------------------------- */
     dSP; 
-    SV         *sv;
+    SV          *sv;
+    char        *n_jstr;
+    int         n_jnum;
+    double      n_jdbl;
     unsigned    i;
     int         count;
-    JSFunction *fun;
+    JSFunction  *fun;
     fun = JS_ValueToFunction(cx, argv[-2]);
 
     /* printf("Function %s received %d arguments\n", 
@@ -159,14 +162,38 @@ FunctionDispatcher(JSContext *cx, JSObject *obj, uintN argc,
 
     if( count > 0) {
         sv = POPs;        
-        if(SvIOK(sv)) {
+        if(SvROK(sv)) {
+            /* Im getting a perl reference here, the user
+             * seems to want to send a perl object to jscript
+             * ok, we will do it, although it seems like a painful
+             * thing to me.
+             */
+
             if(Debug)
-                fprintf(stderr, "DEBUG: %lx is an IV\n", (long) sv);
-            *rval = OBJECT_TO_JSVAL(SvIV(sv));
-        } else {
+                fprintf(stderr, "DEBUG: %lx is a ref!\n", (long) sv);
+            *rval = OBJECT_TO_JSVAL(SvIV(SvRV(sv)));
+        }
+        else if(SvIOK(sv)) {
+            /* It appears that we have been sent an int return
+             * value.  Thats fine we can give javascript an int
+             */
+            n_jnum=SvIV(sv);
+            if(Debug)
+                fprintf(stderr, "DEBUG: %lx is an int (%d)\n", (long) sv,n_jnum);
+            *rval = INT_TO_JSVAL(n_jnum);
+        } else if(SvNOK(sv)) {
+            /* It appears that we have been sent an double return
+             * value.  Thats fine we can give javascript an double
+             */
+            n_jdbl=SvNV(sv);
+
             if(Debug) 
-                fprintf(stderr, "DEBUG: %lx is a string\n", (long) sv);
-            *rval = STRING_TO_JSVAL(SvPV(sv, PL_na));
+                fprintf(stderr, "DEBUG: %lx is a double(%f)\n", (long) sv,n_jdbl);
+            *rval = DOUBLE_TO_JSVAL(JS_NewDouble(cx, n_jdbl));
+        } else if(SvPOK(sv)) {
+            n_jstr = SvPV(sv, PL_na);
+            //warn("DEBUG: %s (%d)\n", n_jstr);
+            *rval = STRING_TO_JSVAL(JS_NewStringCopyZ(cx, n_jstr));
         }
     }
 
