@@ -80,7 +80,7 @@ use Log::Log4perl qw(:easy);
 require Exporter;
 require DynaLoader;
 
-our $VERSION     = '0.16';
+our $VERSION     = '0.17';
 our @ISA         = qw(Exporter DynaLoader);
 our %EXPORT_TAGS = ( 'all' => [ qw() ] );
 our @EXPORT_OK   = ( @{ $EXPORT_TAGS{'all'} } );
@@ -536,6 +536,8 @@ sub eval {
 ##################################################
     my ($self, $script) = @_;
 
+    return 1 unless defined $script;
+
     my $ok = 
         JavaScript::SpiderMonkey::JS_EvaluateScript(
             $self->{context}, $self->{global_object},
@@ -573,16 +575,16 @@ __END__
 
 First, get the latest SpiderMonkey distribution from mozilla.org:
 http://www.mozilla.org/js/spidermonkey shows which releases are available.
-C<js-1.5-rc3a.tar.gz> has been proven to work.
+C<js-1.5.tar.gz> has been proven to work.
 
 Untar it at the same directory level as you just untarred the 
 C<JavaScript::SpiderMonkey> distribution you're currently reading.
 So, if you're currently in C</my/path/JavaScript-SpiderMonkey-v.vv>, do
 this:
 
-    cp js-1.5-rc3a.tar.gz /my/path
+    cp js-1.5.tar.gz /my/path
     cd /my/path
-    tar zxfv js-1.5-rc3a.tar.gz
+    tar zxfv js-1.5.tar.gz
 
 Then, compile the SpiderMonkey distribution, if you're on Linux, 
 just use:
@@ -620,13 +622,24 @@ Now, build JavaScript::SpiderMonkey in the standard way:
     make test
     make install
 
-=head1 AUTHOR
+=head1 E4X SUPPORT
 
-Mike Schilli, E<lt>m@perlmeister.comE<gt>
+To build JavaScript-SpiderMonkey with E4X (ECMAScript for XML) support:
+
+    perl Makefile.PL -E4X
+
+Please note that E4X support is not included in the SpiderMonkey JS1.5 final release. You will probably
+need to download more recent sourcecode directly from CVS.   
+
+=head1 AUTHORS
+
+  Mike Schilli, <m at perlmeister dot com>
+  Thomas Busch, <tbusch at cpan dot org> (current maintainer)
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright 2002 by Mike Schilli
+  Copyright (c) 2002-2005 Mike Schilli
+  Copyright (c) 2006 Thomas Busch
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself. 
