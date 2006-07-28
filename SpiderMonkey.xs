@@ -295,6 +295,9 @@ JS_NewContext(rt, stack_chunk_size)
         if(!cx) {
             XSRETURN_UNDEF;
         }
+#ifdef E4X
+        JS_SetOptions(cx,JSOPTION_XML);
+#endif
         RETVAL = cx;
     }
     OUTPUT:
