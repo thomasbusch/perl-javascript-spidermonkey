@@ -1,5 +1,16 @@
 Revision history for Perl extension JavaScript::SpiderMonkey.
 
+0.17 (27/07/2006)
+    (tb) Made sure eval function doesn't produce warnings when script
+         variable is uninitialized.
+         [was supposed to be part of 0.16 but is actually part of 0.17]
+    (tb) Added support for E4X
+
+0.16 (13/06/2006)
+    (tb) Added patch initially proposed by marc [at] igneousconsulting.com
+         and subsequently modified by Agent Zhang that allows mapped perl
+         functions to return varied datatypes back to JavaScript
+
 0.15 (28/02/2006)
     (tb) Rewrote Makefile.PL to work on more platforms
 
