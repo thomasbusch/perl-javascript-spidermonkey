@@ -11,6 +11,9 @@
 #
 ######################################################################
 
+use ExtUtils::MakeMaker;
+use Getopt::Long;
+
 # Get the right lib and include dirs for different platforms
 
 my $JS_LIB_DIR;
@@ -99,8 +102,17 @@ if ($^O ne 'MSWin32') {
   $JS_DEFINE  = '-DXP_WIN';
 };
 
+my $E4X = 0;
+GetOptions(
+  "E4X" => \$E4X,
+);
 
-use ExtUtils::MakeMaker;
+## Add E4X support if flag set.
+## For more info about E4X check http://en.wikipedia.org/wiki/E4X
+if ($E4X) {
+  $JS_DEFINE .= " -DE4X";
+  print "E4X support enabled\n";
+}
 
 # See lib/ExtUtils/MakeMaker.pm for details of how to influence
 # the contents of the Makefile that is written.
