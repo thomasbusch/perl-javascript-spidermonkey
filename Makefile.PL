@@ -27,13 +27,17 @@ my @c_header_files = qw(
 my @possible_libraries = qw(
   libjs.a
   js32.dll
+  libmozjs.so
 );
 
 my %possible_install_paths = (
   "../js/src/*"      => "../js/src",
   "/usr/lib"         => "/usr/include",
   "/usr/local/lib"   => "/usr/local/include",
+  "/usr/lib/firefox" => "/usr/include/firefox",
 );
+
+my ($JS_LIB_DIR, @JS_INCL_DIRS, $JS_LIB_NAME);
 
 foreach my $install_path(keys %possible_install_paths) {
   foreach my $possible_lib(@possible_libraries) {
@@ -55,6 +59,11 @@ foreach my $install_path(keys %possible_install_paths) {
       if (scalar(@JS_INCL_DIRS) == scalar(@c_header_files)) {
         $JS_LIB_DIR = $libfile;
         $JS_LIB_DIR =~ s/$possible_lib$//;
+
+        $JS_LIB_NAME = $possible_lib;
+        $JS_LIB_NAME =~ s/\.(a|so|dll)$//;
+        $JS_LIB_NAME =~ s/^lib//;
+
         last;
       } else {
         @JS_INCL_DIRS = ();
@@ -87,25 +96,29 @@ EOT
   foreach my $include_dir(@JS_INCL_DIRS) {
     print "JS_INCL_DIR: $include_dir\n";
   }
+  print "JS_LIB_NAME: $JS_LIB_NAME\n";
 }
 
-## Determine library name and system-related defines
+#### Determine compile options
+##############################
 
-my $JS_LIB_NAME;
 my $JS_DEFINE;
-
-if ($^O ne 'MSWin32') {
-  $JS_LIB_NAME = 'js';
-  $JS_DEFINE  = '-DXP_UNIX';
-} else {
-  $JS_LIB_NAME = 'js32';
-  $JS_DEFINE  = '-DXP_WIN';
-};
-
 my $E4X = 0;
+my $JS_THREADSAFE = 0;
+
+## Get options from command line
 GetOptions(
   "E4X" => \$E4X,
+  "JS_THREADSAFE" => \$JS_THREADSAFE,
 );
+
+
+## Determine library name and system-related defines
+if ($^O ne 'MSWin32') {
+  $JS_DEFINE  = '-DXP_UNIX';
+} else {
+  $JS_DEFINE  = '-DXP_WIN';
+};
 
 ## Add E4X support if flag set.
 ## For more info about E4X check http://en.wikipedia.org/wiki/E4X
@@ -114,8 +127,17 @@ if ($E4X) {
   print "E4X support enabled\n";
 }
 
-# See lib/ExtUtils/MakeMaker.pm for details of how to influence
-# the contents of the Makefile that is written.
+## Support compiling in thread safe environment
+if ($JS_THREADSAFE) {
+  $JS_DEFINE .= " -DJS_THREADSAFE";
+  print "Compiling with JS_THREADSAFE flag\n";
+}
+
+
+#### See lib/ExtUtils/MakeMaker.pm for details of how to influence
+#### the contents of the Makefile that is written.
+##################################################
+
 WriteMakefile(
     'NAME'		=> 'JavaScript::SpiderMonkey',
     'VERSION_FROM'	=> 'SpiderMonkey.pm', # finds $VERSION

@@ -1,5 +1,9 @@
 Revision history for Perl extension JavaScript::SpiderMonkey.
 
+0.18 (08/06/2007)
+    (tb) Added protection against infinte loops
+    (tb) Added support for JS_THREADSAFE
+
 0.17 (27/07/2006)
     (tb) Made sure eval function doesn't produce warnings when script
          variable is uninitialized.

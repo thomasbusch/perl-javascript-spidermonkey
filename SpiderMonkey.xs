@@ -13,6 +13,7 @@
 #include "perl.h"
 #include "XSUB.h"
 #include "jsapi.h"
+#include "SpiderMonkey.h"
 
 #ifdef _MSC_VER
     /* As suggested in https://rt.cpan.org/Ticket/Display.html?id=6984 */
@@ -28,6 +29,8 @@ JSClass global_class = {
 };
 
 static int Debug = 0;
+
+static int max_branch_operations = 0;
 
 /* It's kinda silly that we have to replicate this for getters and setters,
  * but there doesn't seem to be a way to distinguish between getters
@@ -215,6 +218,22 @@ ErrorReporter(JSContext *cx, const char *message, JSErrorReport *report) {
      sv_setpv(get_sv("@", TRUE), msg);
 }
 
+/* --------------------------------------------------------------------- */
+static JSBool
+BranchHandler(JSContext *cx, JSScript *script) {
+/* --------------------------------------------------------------------- */
+  PJS_Context* pcx = (PJS_Context*) JS_GetContextPrivate(cx);
+
+  pcx->branch_count++;
+  if (pcx->branch_count > pcx->branch_max) {
+    return JS_FALSE;
+  } else {
+    return JS_TRUE;
+  }
+}
+
+
+
 MODULE = JavaScript::SpiderMonkey	PACKAGE = JavaScript::SpiderMonkey
 PROTOTYPES: DISABLE
 
@@ -291,6 +310,7 @@ JS_NewContext(rt, stack_chunk_size)
     JSContext *cx;
     CODE:
     {
+        PJS_Context* pcx;
         cx = JS_NewContext(rt, stack_chunk_size);
         if(!cx) {
             XSRETURN_UNDEF;
@@ -298,6 +318,10 @@ JS_NewContext(rt, stack_chunk_size)
 #ifdef E4X
         JS_SetOptions(cx,JSOPTION_XML);
 #endif
+
+        Newz(1, pcx, 1, PJS_Context);
+        JS_SetContextPrivate(cx, (void *)pcx);
+
         RETVAL = cx;
     }
     OUTPUT:
@@ -311,6 +335,7 @@ JS_DestroyContext(cx)
     CODE:
     {
         JS_DestroyContext(cx);
+        Safefree(JS_GetContextPrivate(cx));
         RETVAL = 0;
     }
     OUTPUT:
@@ -642,15 +667,40 @@ JS_GetElement(cx, obj, idx)
 
 ######################################################################
 JSClass *
-JS_GetClass(obj)
+JS_GetClass(cx, obj)
+    JSContext  * cx
     JSObject  * obj
 ######################################################################
     PREINIT:
     JSClass *rc;
     CODE:
     {
+#ifdef JS_THREADSAFE
+        rc = JS_GetClass(cx, obj);
+#else
         rc = JS_GetClass(obj);
+#endif
         RETVAL = rc;
     }
     OUTPUT:
     RETVAL
+
+
+######################################################################
+void
+JS_SetMaxBranchOperations(cx, max_branch_operations)
+    JSContext  *cx
+    int         max_branch_operations
+######################################################################
+    CODE:
+    {
+        PJS_Context* pcx = (PJS_Context *) JS_GetContextPrivate(cx);
+        pcx->branch_count = 0;
+        pcx->branch_max = max_branch_operations;
+        JS_SetBranchCallback(cx, BranchHandler);
+    }
+    OUTPUT:
+
+
+######################################################################
+
