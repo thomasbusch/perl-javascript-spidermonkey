@@ -80,7 +80,7 @@ use Log::Log4perl qw(:easy);
 require Exporter;
 require DynaLoader;
 
-our $VERSION     = '0.18';
+our $VERSION     = '0.19';
 our @ISA         = qw(Exporter DynaLoader);
 our %EXPORT_TAGS = ( 'all' => [ qw() ] );
 our @EXPORT_OK   = ( @{ $EXPORT_TAGS{'all'} } );
@@ -540,8 +540,12 @@ sub eval {
 
     my $ok = 
         JavaScript::SpiderMonkey::JS_EvaluateScript(
-            $self->{context}, $self->{global_object},
-            $script, length($script), "Perl", 0);
+            $self->{context},
+            $self->{global_object},
+            $script, 
+            $] > 5.007 ? bytes::length($script) : length($script),
+            "Perl",
+            0);
 
     return $ok;
 }
