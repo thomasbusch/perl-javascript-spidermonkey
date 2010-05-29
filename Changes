@@ -1,5 +1,16 @@
 Revision history for Perl extension JavaScript::SpiderMonkey.
 
+0.20 (29/05/2010)
+    (tb) Applied Ben Bullock's patch which fixes the following:
+           1. JS_Init is deprecated and to be replaced by JS_NewRuntime (RT #48852)
+           2. line number bug in error messages (RT #57572)
+           3. Newline bug in error messages (RT #57617)
+           4. Null pointer bug in error messages.
+           5. spelling mistakes and grammatical errors in documentation
+         and which adds Makefile.PL options to specify the location of the
+         SpiderMonkey libraries. It also removes an unncessary dependency on
+         Log::Log4Perl which is only used in debug mode.
+
 0.19 (05/09/2007)
     (tb) Allocate correct amount of memory for scripts that contain UTF-8
          characters with internal UTF-8 flag on. 

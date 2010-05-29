@@ -31,5 +31,6 @@ t/11intret.t
 t/12dblret.t
 t/13strret.t
 t/init.pl
+t/error.t
 typemap
 util/download.pl

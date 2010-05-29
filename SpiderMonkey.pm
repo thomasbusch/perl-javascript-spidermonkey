@@ -80,7 +80,7 @@ use Log::Log4perl qw(:easy);
 require Exporter;
 require DynaLoader;
 
-our $VERSION     = '0.19';
+our $VERSION     = '0.20';
 our @ISA         = qw(Exporter DynaLoader);
 our %EXPORT_TAGS = ( 'all' => [ qw() ] );
 our @EXPORT_OK   = ( @{ $EXPORT_TAGS{'all'} } );
@@ -151,8 +151,11 @@ sub init {
 ##################################################
     my ($self) = @_;
 
+# Changed JS_Init to JS_NewRuntime. See bug report
+# https://rt.cpan.org/Public/Bug/Display.html?id=48852
+# BKB 2010-05-24 10:04:09
     $self->{runtime} = 
-        JavaScript::SpiderMonkey::JS_Init(1000000);
+        JavaScript::SpiderMonkey::JS_NewRuntime(1000000);
     $self->{context} = 
         JavaScript::SpiderMonkey::JS_NewContext($self->{runtime}, 8192);
     $self->{global_class} = 
@@ -374,13 +377,13 @@ requested or set:
         print "$property_path set to value $value\n";
     }
 
-    $js-E<gt>property_by_path("document.location.href", "abc",
+    $js->property_by_path("document.location.href", "abc",
                               \&getter, \&setter);
 
-If you leave out C<$getter> and C<$setter>, there's going to be no
-callbacks triggerd while the properity is set or queried.
-If you just want to specify a C<$setter>, but no C<$getter>,
-set the C<$getter> to C<undef>.
+If you leave out C<$getter> and C<$setter>, no callbacks are going to
+be triggered while the property is set or queried.  If you just want
+to specify a C<$setter>, but no C<$getter>, set the C<$getter> to
+C<undef>.
 
 =cut
 
@@ -545,7 +548,10 @@ sub eval {
             $script, 
             $] > 5.007 ? bytes::length($script) : length($script),
             "Perl",
-            0);
+# Fixed the line number bug:
+# https://rt.cpan.org/Public/Bug/Display.html?id=57572
+# BKB 2010-05-24 10:06:57
+            1);
 
     return $ok;
 }

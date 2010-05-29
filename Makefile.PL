@@ -39,6 +39,27 @@ my %possible_install_paths = (
 
 my ($JS_LIB_DIR, @JS_INCL_DIRS, $JS_LIB_NAME);
 
+#### Determine compile options
+##############################
+
+my $JS_DEFINE;
+my $E4X = 0;
+my $JS_THREADSAFE = 0;
+
+## Get options from command line
+
+# Altered so that library location can be specified from the command line.
+# BKB 2010-05-24 10:03:09
+
+GetOptions(
+  "E4X" => \$E4X,
+  "JS_THREADSAFE" => \$JS_THREADSAFE,
+  "JS_LIB_DIR=s"    => \$JS_LIB_DIR,
+  "JS_LIB_NAME=s"   => \$JS_LIB_NAME,         
+);
+if ($JS_LIB_DIR) {
+    push @JS_INCL_DIRS, $JS_LIB_DIR;
+}
 foreach my $install_path(keys %possible_install_paths) {
   foreach my $possible_lib(@possible_libraries) {
     foreach my $libfile(glob "$install_path/$possible_lib") {
@@ -99,18 +120,6 @@ EOT
   print "JS_LIB_NAME: $JS_LIB_NAME\n";
 }
 
-#### Determine compile options
-##############################
-
-my $JS_DEFINE;
-my $E4X = 0;
-my $JS_THREADSAFE = 0;
-
-## Get options from command line
-GetOptions(
-  "E4X" => \$E4X,
-  "JS_THREADSAFE" => \$JS_THREADSAFE,
-);
 
 
 ## Determine library name and system-related defines
@@ -142,13 +151,16 @@ WriteMakefile(
     'NAME'		=> 'JavaScript::SpiderMonkey',
     'VERSION_FROM'	=> 'SpiderMonkey.pm', # finds $VERSION
     'PREREQ_PM'		=> {
-        'Log::Log4perl' => 0,
+# In fact, the following module isn't needed unless debugging is
+# switched on, so let's reduce the dependencies:
+# BKB 2010-05-24 10:01:52
+#        'Log::Log4perl' => 0,
         'Data::Dumper'  => 0,
-                           }, # e.g., Module::Name => 1.1
+                           },
     ($] >= 5.005 ?    ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM => 'SpiderMonkey.pm', # retrieve abstract from module
        AUTHOR     => 'Mike Schilli <m@perlmeister.com>') : ()),
-    'LIBS'		=> ["-L$JS_LIB_DIR -l$JS_LIB_NAME"], # e.g., '-lm'
+    'LIBS'		=> ["-L$JS_LIB_DIR -l$JS_LIB_NAME"],
     'DEFINE'		=> $JS_DEFINE, # e.g., '-DHAVE_SOMETHING'
 	# Insert -I. if you add *.h files later:
     'INC'		=> "-I".join " -I", @JS_INCL_DIRS,

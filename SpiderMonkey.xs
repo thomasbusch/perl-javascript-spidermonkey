@@ -212,9 +212,30 @@ static void
 ErrorReporter(JSContext *cx, const char *message, JSErrorReport *report) {
 /* --------------------------------------------------------------------- */
      char msg[400];
-     snprintf(msg, sizeof(msg), 
-              "Error: %s at line %d: %s", message, report->lineno,
-              report->linebuf);
+     if (report->linebuf) {
+         int i = 0;
+         int printed = 
+             snprintf (msg, sizeof(msg), 
+                       "Error: %s at line %d: ", message, report->lineno
+                       );
+         /* Don't print the \n at the end of report->linebuf. */
+         while (printed < sizeof (msg) - 1) {
+             if (report->linebuf[i] == '\n')
+                 break;
+             msg[printed] = report->linebuf[i];
+             printed++;
+             i++;
+         }
+         msg[printed] = '\0';
+     } else {
+         /*
+           Fix for following bug (report->linebuf is null at runtime):
+           https://rt.cpan.org/Public/Bug/Display.html?id=57617
+           BKB 2010-05-24 10:12:45
+          */
+         snprintf(msg, sizeof(msg), 
+                  "Error: %s at line %d", message, report->lineno);
+     }
      sv_setpv(get_sv("@", TRUE), msg);
 }
 

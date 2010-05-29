@@ -20,14 +20,15 @@ JavaScript-SpiderMonkey-1.00
 js
 js-1.5-rc3a.tar.gz
 
-Now, build JavaScript::SpiderMonkey in the standard way:
+Alternatively, specify the location of the library on the command line
+to Makefile.PL using the --js_lib_dir and --js_lib_name options:
+
+perl Makefile.PL --js_lib_dir /path/to/library/ --js_lib_name js
+
+Next, build JavaScript::SpiderMonkey in the standard way:
 
 cd JavaScript-SpiderMonkey-1.00
 perl Makefile.PL
 gmake
 gmake test
 gmake install
-
--- and you're good to go! Have fun.
-
-Mike Schilli, m@perlmeister.com, 2002
