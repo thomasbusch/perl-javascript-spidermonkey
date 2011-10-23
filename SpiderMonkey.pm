@@ -5,7 +5,8 @@ package JavaScript::SpiderMonkey;
 # Last Checkin: $Date$
 # By:           $Author$
 #
-# Author: Mike Schilli m@perlmeister.com, 2002
+# Authors: Mike Schilli  m@perlmeister.com, 2002-2005
+#          Thomas Busch  tbusch@cpan.org, 2006-2011
 ######################################################################
 
 =head1 NAME
@@ -80,7 +81,7 @@ use Log::Log4perl qw(:easy);
 require Exporter;
 require DynaLoader;
 
-our $VERSION     = '0.20';
+our $VERSION     = '0.21';
 our @ISA         = qw(Exporter DynaLoader);
 our %EXPORT_TAGS = ( 'all' => [ qw() ] );
 our @EXPORT_OK   = ( @{ $EXPORT_TAGS{'all'} } );
