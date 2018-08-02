@@ -6,7 +6,7 @@ package JavaScript::SpiderMonkey;
 # By:           $Author$
 #
 # Authors: Mike Schilli  m@perlmeister.com, 2002-2005
-#          Thomas Busch  tbusch@cpan.org, 2006-2011
+#          Thomas Busch  tbusch@cpan.org, 2006-2018
 ######################################################################
 
 =head1 NAME
@@ -81,7 +81,7 @@ use Log::Log4perl qw(:easy);
 require Exporter;
 require DynaLoader;
 
-our $VERSION     = '0.21';
+our $VERSION     = '0.22';
 our @ISA         = qw(Exporter DynaLoader);
 our %EXPORT_TAGS = ( 'all' => [ qw() ] );
 our @EXPORT_OK   = ( @{ $EXPORT_TAGS{'all'} } );
@@ -162,9 +162,8 @@ sub init {
     $self->{global_class} = 
         JavaScript::SpiderMonkey::JS_GlobalClass();
     $self->{global_object} = 
-        JavaScript::SpiderMonkey::JS_NewObject(
-            $self->{context}, $self->{global_class}, 
-            $self->{global_class}, $self->{global_class});
+        JavaScript::SpiderMonkey::JS_NewCompartmentAndGlobalObject(
+            $self->{context}, $self->{global_class}); 
 
     JavaScript::SpiderMonkey::JS_InitStandardClasses($self->{context}, 
                                                      $self->{global_object});
@@ -671,7 +670,7 @@ To build JavaScript-SpiderMonkey when using a thread safe version of SpiderMonke
 =head1 COPYRIGHT AND LICENSE
 
   Copyright (c) 2002-2005 Mike Schilli
-  Copyright (c) 2006-2007 Thomas Busch
+  Copyright (c) 2006-2018 Thomas Busch
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself. 

@@ -28,6 +28,8 @@ my @possible_libraries = qw(
   libjs.a
   js32.dll
   libmozjs.so
+  libmozjs185.so
+  libmozjs187.so
 );
 
 my %possible_install_paths = (
