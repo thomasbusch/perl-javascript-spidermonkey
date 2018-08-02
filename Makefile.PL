@@ -2,12 +2,8 @@
 #
 # MakeMaker file for JavaScript::SpiderMonkey
 #
-# Revision:     $Revision$
-# Last Checkin: $Date$
-# By:           $Author$
-#
 # Authors: Mike Schilli  m@perlmeister.com, 2002-2005
-#          Thomas Busch  tbusch@cpan.org, 2006-2011
+#          Thomas Busch  tbusch@cpan.org, 2006-2018
 #
 ######################################################################
 
