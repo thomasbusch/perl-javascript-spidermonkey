@@ -1,5 +1,5 @@
 name:         JavaScript-SpiderMonkey
-version:      0.22
+version:      0.23
 version_from: SpiderMonkey.pm
 installdirs:  site
 requires:
