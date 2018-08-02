@@ -2,10 +2,6 @@
 /* SpiderMonkey.xs -- Perl Interface to the SpiderMonkey JavaScript      */
 /*                    implementation.                                    */
 /*                                                                       */
-/* Revision:     $Revision$                                        */
-/* Last Checkin: $Date$                            */
-/* By:           $Author$                                     */
-/*                                                                       */
 /* Author: Mike Schilli mschilli1@aol.com, 2001                          */
 /* --------------------------------------------------------------------- */
 
