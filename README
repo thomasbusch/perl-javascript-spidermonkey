@@ -200,11 +200,13 @@ SpiderMonkey Installation
         make test
         make install
 
-AUTHOR
-    Mike Schilli, <m@perlmeister.com>
+AUTHORS 
+    Mike Schilli
+    Thomas Busch
 
 COPYRIGHT AND LICENSE
-    Copyright 2002 by Mike Schilli
+    Copyright (c) 2002-2005 Mike Schilli
+    Copyright (c) 2006-2018 Thomas Busch
 
     This library is free software; you can redistribute it and/or modify it
     under the same terms as Perl itself.
