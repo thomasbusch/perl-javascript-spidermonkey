@@ -3,7 +3,6 @@ INSTALL
 Makefile.PL
 MANIFEST
 MANIFEST.SKIP
-META.yml			Module meta-data (added by MakeMaker)
 README
 SpiderMonkey.pm
 SpiderMonkey.xs
