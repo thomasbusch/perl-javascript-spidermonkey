@@ -163,9 +163,21 @@ WriteMakefile(
     'LIBS'		=> ["-L$JS_LIB_DIR -l$JS_LIB_NAME"],
     'DEFINE'		=> $JS_DEFINE, # e.g., '-DHAVE_SOMETHING'
 	# Insert -I. if you add *.h files later:
-    'INC'		=> "-I".join " -I", @JS_INCL_DIRS,
+    'INC'		=> "-I" . join (" -I", @JS_INCL_DIRS),
 	# Un-comment this if you add C files to link with later:
     # 'OBJECT'		=> '$(O_FILES)', # link all the C files too
+
+    META_MERGE => {
+      "meta-spec" => { version => 2 },
+
+      resources => {
+        repository => {
+          type => 'git',
+          url => 'git://github.com/thomasbusch/perl-javascript-spidermonkey.git',
+          web => 'https://github.com/thomasbusch/perl-javascript-spidermonkey',
+        },
+      },
+    },
 );
 
 ######################################################################
