@@ -168,17 +168,21 @@ WriteMakefile(
 	# Un-comment this if you add C files to link with later:
     # 'OBJECT'		=> '$(O_FILES)', # link all the C files too
 
-    META_MERGE => {
-      "meta-spec" => { version => 2 },
+    (eval { ExtUtils::MakeMaker->VERSION(6.46) } ?
+      (
+        META_MERGE => {
+          "meta-spec" => { version => 2 },
 
-      resources => {
-        repository => {
-          type => 'git',
-          url => 'git://github.com/thomasbusch/perl-javascript-spidermonkey.git',
-          web => 'https://github.com/thomasbusch/perl-javascript-spidermonkey',
-        },
-      },
-    },
+          resources => {
+            repository => {
+              type => 'git',
+              url => 'git://github.com/thomasbusch/perl-javascript-spidermonkey.git',
+              web => 'https://github.com/thomasbusch/perl-javascript-spidermonkey',
+            },
+          },
+        }
+      ) : ()
+    ),
 );
 
 ######################################################################
