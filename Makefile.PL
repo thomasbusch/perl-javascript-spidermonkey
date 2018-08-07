@@ -150,6 +150,7 @@ if ($JS_THREADSAFE) {
 WriteMakefile(
     'NAME'		=> 'JavaScript::SpiderMonkey',
     'VERSION_FROM'	=> 'SpiderMonkey.pm', # finds $VERSION
+    'LICENSE'   	=> 'perl_5',
     'PREREQ_PM'		=> {
 # In fact, the following module isn't needed unless debugging is
 # switched on, so let's reduce the dependencies:
