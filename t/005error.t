@@ -23,7 +23,7 @@ EOT
 
 $js->eval($code);
 
-if($@ =~ /unterminated string literal/) {
+if($@ =~ /unterminated string literal|literal not terminated|unescaped line break/) {
     print "ok 1\n";
 } else {
     print "not ok 1\n";

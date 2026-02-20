@@ -1,17 +1,11 @@
 ######################################################################
 # Typemap for JavaScript::SpiderMonkey
 #
-# Revision:     $Revision$
-# Last Checkin: $Date$
-# By:           $Author$
 # Author:       Mike Schilli mschilli1@aol.com, 2002
 ######################################################################
-JSRuntime      * T_PTRREF
 JSContext      * T_PTRREF
 JSClass        * T_PTRREF
 JSObject       * T_PTRREF
 JSNative         T_PTRREF
 JSPropertySpec * T_PTRREF
 JSFunctionSpec * T_PTRREF
-uintN            T_SV
-JSBool           T_SV

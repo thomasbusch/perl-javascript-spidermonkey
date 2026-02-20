@@ -1,5 +1,28 @@
 Revision history for Perl extension JavaScript::SpiderMonkey.
 
+0.26 (20/02/2026)
+    (tb) Ported to mozjs-60 and mozjs-78 (SpiderMonkey 60 and 78)
+    (tb) Rewrote Makefile.PL to use ExtUtils::PkgConfig, auto-detecting
+         mozjs-60 or mozjs-78 with version-appropriate C++ standard
+    (tb) Rewrote XS bindings for mozjs-60 C++ API:
+         - Replaced JSRuntime with single-context model
+         - Updated to JS::Evaluate, JS::CompileOptions, JS::RootedObject/Value
+         - Replaced JS_SetErrorReporter with JS::SetWarningReporter and
+           exception-based error reporting
+         - Updated getter/setter dispatchers for new JSGetterOp/JSSetterOp
+           signatures with external property value storage
+         - Updated FunctionDispatcher to JS::CallArgs API
+         - Replaced JS_SetOperationCallback with JS_AddInterruptCallback
+    (tb) Added conditional compilation for mozjs-78:
+         - Compartments replaced by Realms (JS::EnterRealm/JS::LeaveRealm)
+         - JS_EncodeString replaced by JS_EncodeStringToLatin1
+         - JS::Evaluate now requires JS::SourceText wrapper
+         - JS_InitStandardClasses replaced by JS::InitRealmStandardClasses
+         - Accessor properties use JS_NewFunction-based getter/setter
+    (tb) Added automatic cleanup via DESTROY method
+    (tb) Removed Log::Log4perl and Data::Dumper dependencies
+    (tb) Updated POD documentation
+
 0.25 (07/08/2018)
     (tb) Added missing license
     (tb) Made sure module works with ExtUtils::MakeMaker below 6.46

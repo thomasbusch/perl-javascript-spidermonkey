@@ -1,266 +1,382 @@
 /* --------------------------------------------------------------------- */
 /* SpiderMonkey.xs -- Perl Interface to the SpiderMonkey JavaScript      */
-/*                    implementation.                                    */
+/*                    implementation (mozjs-60 and mozjs-78).             */
 /*                                                                       */
 /* Author: Mike Schilli mschilli1@aol.com, 2001                          */
+/* Updated for mozjs60 by Thomas Busch, 2024                             */
 /* --------------------------------------------------------------------- */
 
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
+
+/* Perl defines macros that conflict with Mozilla C++ headers */
+#undef Move
+#undef Copy
+#undef Zero
+#undef Pause
+#undef seed
+#undef Bit
+
 #include "jsapi.h"
+#include "js/Initialization.h"
+#include "js/Conversions.h"
+
+#if MOZJS_MAJOR_VERSION >= 78
+#include "js/CompilationAndEvaluation.h"
+#include "js/SourceText.h"
+#include "js/Array.h"
+#include "js/Warnings.h"
+#include "js/CharacterEncoding.h"
+#endif
+
 #include "SpiderMonkey.h"
 
-#ifdef _MSC_VER
-    /* As suggested in https://rt.cpan.org/Ticket/Display.html?id=6984 */
-#define snprintf _snprintf 
+/* Re-define Perl memory macros under safe names */
+#define PerlMove(s,d,n,t) memmove((char*)(d),(const char*)(s), (n) * sizeof(t))
+#define PerlCopy(s,d,n,t) memcpy((char*)(d),(const char*)(s), (n) * sizeof(t))
+#define PerlZero(d,n,t)   memset((char*)(d), 0, (n) * sizeof(t))
+
+/* --------------------------------------------------------------------- */
+/* Compat helpers for JS_EncodeString (mozjs-60) vs                      */
+/* JS_EncodeStringToLatin1 (mozjs-78, returns UniqueChars)               */
+/* --------------------------------------------------------------------- */
+#if MOZJS_MAJOR_VERSION >= 78
+  static JS::UniqueChars EncodeString(JSContext *cx, JSString *str) {
+      return JS_EncodeStringToLatin1(cx, str);
+  }
+  #define SM_ENCODED_CHARS(uc)     ((uc).get())
+  #define SM_FREE_ENCODED(cx, uc)  /* no-op: UniqueChars auto-frees */
+  typedef JS::UniqueChars EncodedString;
+#else
+  static char* EncodeString(JSContext *cx, JSString *str) {
+      return JS_EncodeString(cx, str);
+  }
+  #define SM_ENCODED_CHARS(raw)    (raw)
+  #define SM_FREE_ENCODED(cx, raw) JS_free(cx, raw)
+  typedef char* EncodedString;
 #endif
 
-#ifndef JSCLASS_GLOBAL_FLAGS
-#define JSCLASS_GLOBAL_FLAGS 0
-#endif
-/* JSRuntime needs this global class */
-static
-JSClass global_class = {
-    "Global", JSCLASS_GLOBAL_FLAGS,
-    JS_PropertyStub,  JS_PropertyStub,  JS_PropertyStub,  JS_PropertyStub,
-    JS_EnumerateStub, JS_ResolveStub,   JS_ConvertStub,   JS_FinalizeStub
+/* Global class ops - all nullptr for minimal class */
+static const JSClassOps global_class_ops = {
+    nullptr,  /* addProperty */
+    nullptr,  /* delProperty */
+    nullptr,  /* enumerate */
+    nullptr,  /* newEnumerate */
+    nullptr,  /* resolve */
+    nullptr,  /* mayResolve */
+    nullptr,  /* finalize */
+    nullptr,  /* call */
+    nullptr,  /* hasInstance */
+    nullptr,  /* construct */
+    JS_GlobalObjectTraceHook  /* trace */
 };
 
-static int Debug = 0;
+static JSClass global_class = {
+    "Global",
+    JSCLASS_GLOBAL_FLAGS,
+    &global_class_ops
+};
 
-static int max_branch_operations = 0;
-
-/* It's kinda silly that we have to replicate this for getters and setters,
- * but there doesn't seem to be a way to distinguish between getters
- * and setters if we use the same function. (Somewhere I read in a 
- * usenet posting there's something like IS_ASSIGN, but this doesn't
- * seem to be in SpiderMonkey 1.5).
- */
+static bool js_engine_initialized = false;
+static JSContext *active_context = nullptr;
 
 /* --------------------------------------------------------------------- */
-JSBool getsetter_dispatcher(
-    JSContext *cx, 
-    JSObject  *obj,
-    jsval      id,
-    jsval     *vp,
-    char      *what
+/* Property value store for accessor properties                           */
+/* In mozjs60, accessor properties have no underlying slot storage.       */
+/* We manage values in a Perl hash keyed by "obj_addr/prop_name".         */
 /* --------------------------------------------------------------------- */
+static HV *prop_store = nullptr;
+
+static void prop_store_init(void) {
+    if (!prop_store)
+        prop_store = newHV();
+}
+
+static void prop_store_clear(void) {
+    if (prop_store) {
+        hv_clear(prop_store);
+    }
+}
+
+static void prop_store_destroy(void) {
+    if (prop_store) {
+        SvREFCNT_dec((SV*)prop_store);
+        prop_store = nullptr;
+    }
+}
+
+static void prop_store_set(void *obj, const char *name, const char *value) {
+    prop_store_init();
+    char key[256];
+    snprintf(key, sizeof(key), "%p/%s", obj, name);
+    hv_store(prop_store, key, strlen(key), newSVpv(value, 0), 0);
+}
+
+static const char* prop_store_get(void *obj, const char *name) {
+    prop_store_init();
+    char key[256];
+    snprintf(key, sizeof(key), "%p/%s", obj, name);
+    SV **svp = hv_fetch(prop_store, key, strlen(key), 0);
+    if (svp && SvOK(*svp))
+        return SvPV_nolen(*svp);
+    return nullptr;
+}
+
+/* --------------------------------------------------------------------- */
+/* Getter/setter dispatchers for accessor properties                      */
+/* --------------------------------------------------------------------- */
+
+#if MOZJS_MAJOR_VERSION >= 78
+/* mozjs-78: JSNative-based getter/setter. The property name is retrieved
+ * from the callee function's name (set via JS_NewFunction). */
+static bool getter_native(JSContext *cx, unsigned argc, JS::Value *vp);
+static bool setter_native(JSContext *cx, unsigned argc, JS::Value *vp);
+#endif
+
+static void call_perl_getsetter(
+    JSContext *cx,
+    void *obj_ptr,
+    const char *prop_name,
+    const char *value_str,
+    const char *what
 ) {
-    dSP; 
+    dSP;
 
-    /* Call back into perl */
-    ENTER ; 
-    SAVETMPS ;
+    ENTER;
+    SAVETMPS;
     PUSHMARK(SP);
-        /* A somewhat nasty trick: Since JS_DefineObject() down below
-         * returns a *JS_Object, which is typemapped as T_PTRREF,
-         * and which is a reference (!) pointing to the real C pointer,
-         * we need to brutally obtain the obj's address by casting
-         * it to an int and forming a scalar out of it.
-         * On the other hand, when Spidermonkey.pm stores the 
-         * object's setters/getters, it will dereference
-         * what it gets from JS_DefineObject() (therefore
-         * obtain the object's address in memory) to index its
-         * hash table.
-         * I hope all reasonable machines can hold an address in
-         * an int.
-         */
-    XPUSHs(sv_2mortal(newSViv(PTR2IV(obj))));
-#if JS_VERSION < 185
-    XPUSHs(sv_2mortal(newSVpv(JS_GetStringBytes(JSVAL_TO_STRING(id)), 0)));
-#else
-    XPUSHs(sv_2mortal(newSVpv(JS_EncodeString(cx, JSVAL_TO_STRING(id)), 0)));
-#endif
+    XPUSHs(sv_2mortal(newSViv(PTR2IV(obj_ptr))));
+    XPUSHs(sv_2mortal(newSVpv(prop_name, 0)));
     XPUSHs(sv_2mortal(newSVpv(what, 0)));
-#if JS_VERSION < 185
-    XPUSHs(sv_2mortal(newSVpv(JS_GetStringBytes(JSVAL_TO_STRING(*vp)), 0)));
-#else
-    XPUSHs(sv_2mortal(newSVpv(JS_EncodeString(cx, JSVAL_TO_STRING(*vp)), 0)));
-#endif
+    XPUSHs(sv_2mortal(newSVpv(value_str ? value_str : "", 0)));
     PUTBACK;
     call_pv("JavaScript::SpiderMonkey::getsetter_dispatcher", G_DISCARD);
     FREETMPS;
     LEAVE;
-
-    return JS_TRUE;
 }
 
+#if MOZJS_MAJOR_VERSION < 78
 /* --------------------------------------------------------------------- */
-JSBool getter_dispatcher(
-    JSContext *cx, 
-    JSObject  *obj,
-#if JS_VERSION < 185
-    jsval      id,
-#else
-    jsid       iid,
-#endif
-    jsval     *vp
+/* mozjs-60: property-op based getter/setter (HandleId provides name)     */
 /* --------------------------------------------------------------------- */
+static bool getter_dispatcher(
+    JSContext *cx,
+    JS::HandleObject obj,
+    JS::HandleId id,
+    JS::MutableHandleValue vp
 ) {
-#if JS_VERSION >= 185
-    jsval id;
-    if (!JS_IdToValue(cx,iid,&id)) {
-        fprintf(stderr, "getter_dispatcher: JS_IdToValue failed.\n");
-	return JS_FALSE;
+    if (!JSID_IS_STRING(id))
+        return true;
+
+    char *prop_name = JS_EncodeString(cx, JSID_TO_STRING(id));
+    if (!prop_name)
+        return false;
+
+    /* Look up stored value */
+    const char *val_str = prop_store_get((void*)obj.get(), prop_name);
+
+    /* Set the return value from our store */
+    if (val_str) {
+        JSString *str = JS_NewStringCopyZ(cx, val_str);
+        if (str)
+            vp.setString(str);
     }
-#endif
-    return getsetter_dispatcher(cx, obj, id, vp, "getter");
+
+    /* Call Perl getter callback */
+    call_perl_getsetter(cx, (void*)obj.get(), prop_name, val_str, "getter");
+
+    JS_free(cx, prop_name);
+    return true;
 }
 
 /* --------------------------------------------------------------------- */
-JSBool setter_dispatcher(
-    JSContext *cx, 
-    JSObject  *obj,
-#if JS_VERSION < 185
-    jsval      id,
-#else
-    jsid       iid,
-    JSBool     strict,
-#endif
-    jsval     *vp
-/* --------------------------------------------------------------------- */
+static bool setter_dispatcher(
+    JSContext *cx,
+    JS::HandleObject obj,
+    JS::HandleId id,
+    JS::HandleValue v,
+    JS::ObjectOpResult &result
 ) {
-#if JS_VERSION >= 185
-    jsval id;
-    if (!JS_IdToValue(cx,iid,&id)) {
-        fprintf(stderr, "setter_dispatcher: JS_IdToValue failed.\n");
-	return JS_FALSE;
+    if (!JSID_IS_STRING(id)) {
+        result.succeed();
+        return true;
     }
-#endif
-    return getsetter_dispatcher(cx, obj, id, vp, "setter");
+
+    char *prop_name = JS_EncodeString(cx, JSID_TO_STRING(id));
+    if (!prop_name)
+        return false;
+
+    /* Convert value to string */
+    JS::RootedString str(cx, JS::ToString(cx, v));
+    char *val_str = nullptr;
+    if (str)
+        val_str = JS_EncodeString(cx, str);
+
+    /* Store value */
+    prop_store_set((void*)obj.get(), prop_name, val_str ? val_str : "");
+
+    /* Call Perl setter callback */
+    call_perl_getsetter(cx, (void*)obj.get(), prop_name, val_str, "setter");
+
+    if (val_str)
+        JS_free(cx, val_str);
+    JS_free(cx, prop_name);
+
+    result.succeed();
+    return true;
 }
 
+#else /* MOZJS_MAJOR_VERSION >= 78 */
 /* --------------------------------------------------------------------- */
-int debug_enabled(
+/* mozjs-78: JSNative getter/setter.  The property name is embedded in    */
+/* the callee function object (created via JS_NewFunction with the        */
+/* property name).                                                        */
 /* --------------------------------------------------------------------- */
-) {
-    dSP; 
+static bool getter_native(JSContext *cx, unsigned argc, JS::Value *vp) {
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
 
-    int enabled = 0;
-    int count   = 0;
+    JS::RootedValue calleeVal(cx, args.calleev());
+    JSFunction *fun = JS_ValueToFunction(cx, calleeVal);
+    JSString *nameStr = JS_GetFunctionId(fun);
+    if (!nameStr)
+        return true;
 
-    /* Call back into perl */
-    ENTER ; 
-    SAVETMPS ;
-    PUTBACK;
-    count = call_pv("JavaScript::SpiderMonkey::debug_enabled", G_SCALAR);
-    if(count == 1) {
-        if(POPi == 1) {
-            enabled = 1;
+    EncodedString name = EncodeString(cx, nameStr);
+    if (!SM_ENCODED_CHARS(name))
+        return false;
+
+    JS::RootedObject thisObj(cx);
+    if (args.thisv().isObject())
+        thisObj = &args.thisv().toObject();
+    else
+        return true;
+
+    const char *val = prop_store_get(thisObj.get(), SM_ENCODED_CHARS(name));
+
+    if (val) {
+        JSString *str = JS_NewStringCopyZ(cx, val);
+        if (str)
+            args.rval().setString(str);
+    }
+
+    call_perl_getsetter(cx, thisObj.get(), SM_ENCODED_CHARS(name), val, "getter");
+    SM_FREE_ENCODED(cx, name);
+    return true;
+}
+
+static bool setter_native(JSContext *cx, unsigned argc, JS::Value *vp) {
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
+
+    JS::RootedValue calleeVal(cx, args.calleev());
+    JSFunction *fun = JS_ValueToFunction(cx, calleeVal);
+    JSString *nameStr = JS_GetFunctionId(fun);
+    if (!nameStr)
+        return true;
+
+    EncodedString name = EncodeString(cx, nameStr);
+    if (!SM_ENCODED_CHARS(name))
+        return false;
+
+    JS::RootedObject thisObj(cx);
+    if (args.thisv().isObject())
+        thisObj = &args.thisv().toObject();
+    else
+        return true;
+
+    /* Convert the first argument (the new value) to string */
+    const char *val_cstr = "";
+    EncodedString val_str(nullptr);
+    if (argc > 0) {
+        JS::RootedString str(cx, JS::ToString(cx, args[0]));
+        if (str) {
+            val_str = EncodeString(cx, str);
+            if (SM_ENCODED_CHARS(val_str))
+                val_cstr = SM_ENCODED_CHARS(val_str);
         }
     }
-    FREETMPS;
-    LEAVE;
 
-    return enabled;
+    prop_store_set(thisObj.get(), SM_ENCODED_CHARS(name), val_cstr);
+    call_perl_getsetter(cx, thisObj.get(), SM_ENCODED_CHARS(name), val_cstr, "setter");
+
+    SM_FREE_ENCODED(cx, val_str);
+    SM_FREE_ENCODED(cx, name);
+    args.rval().setUndefined();
+    return true;
 }
+#endif /* MOZJS_MAJOR_VERSION >= 78 */
 
 /* --------------------------------------------------------------------- */
-static JSBool
-#if JS_VERSION < 185
-FunctionDispatcher(JSContext *cx, JSObject *obj, uintN argc, 
-    jsval *argv, jsval *rval) {
-#else
-FunctionDispatcher(JSContext *cx, uintN argc, jsval *vp) {
-#endif
+static bool
+FunctionDispatcher(JSContext *cx, unsigned argc, JS::Value *vp) {
 /* --------------------------------------------------------------------- */
-    dSP; 
-#if JS_VERSION >= 185
-    JSObject *obj = JS_THIS_OBJECT(cx,vp);
-    jsval *argv = JS_ARGV(cx,vp);
-    jsval rval;
-#endif
+    dSP;
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
+
     SV          *sv;
     char        *n_jstr;
     int         n_jnum;
     double      n_jdbl;
     unsigned    i;
     int         count;
-    JSFunction  *fun;
-    fun = JS_ValueToFunction(cx, argv[-2]);
 
-    /* printf("Function %s received %d arguments\n", 
-           (char *) JS_GetFunctionName(fun),
-           (int) argc); */
+    JS::RootedValue calleeVal(cx, args.calleev());
+    JSFunction *fun = JS_ValueToFunction(cx, calleeVal);
 
-    /* Call back into perl */
-    ENTER ; 
-    SAVETMPS ;
+    ENTER;
+    SAVETMPS;
     PUSHMARK(SP);
-    XPUSHs(sv_2mortal(newSViv(PTR2IV(obj))));
-    XPUSHs(sv_2mortal(newSVpv(
-#if JS_VERSION < 185
-        JS_GetStringBytes(JS_GetFunctionId(fun)), 0)));
-#else
-        JS_EncodeString(cx, JS_GetFunctionId(fun)), 0)));
-#endif
-    for(i=0; i<argc; i++) {
-        XPUSHs(sv_2mortal(newSVpv(
-#if JS_VERSION < 185
-            JS_GetStringBytes(JS_ValueToString(cx, argv[i])), 0)));
-#else
-            JS_EncodeString(cx, JS_ValueToString(cx, argv[i])), 0)));
-#endif
+
+    /* Push 'this' object pointer */
+    JS::RootedObject thisObj(cx);
+    if (args.thisv().isObject()) {
+        thisObj = &args.thisv().toObject();
     }
+    XPUSHs(sv_2mortal(newSViv(PTR2IV(thisObj.get()))));
+
+    /* Push function name */
+    JSString *funId = JS_GetFunctionId(fun);
+    if (funId) {
+        EncodedString fname = EncodeString(cx, funId);
+        XPUSHs(sv_2mortal(newSVpv(SM_ENCODED_CHARS(fname), 0)));
+        SM_FREE_ENCODED(cx, fname);
+    } else {
+        XPUSHs(sv_2mortal(newSVpv("anonymous", 0)));
+    }
+
+    /* Push arguments */
+    for (i = 0; i < argc; i++) {
+        JS::RootedString argStr(cx, JS::ToString(cx, args[i]));
+        if (argStr) {
+            EncodedString encoded = EncodeString(cx, argStr);
+            XPUSHs(sv_2mortal(newSVpv(SM_ENCODED_CHARS(encoded), 0)));
+            SM_FREE_ENCODED(cx, encoded);
+        } else {
+            XPUSHs(sv_2mortal(newSVpv("", 0)));
+        }
+    }
+
     PUTBACK;
     count = call_pv("JavaScript::SpiderMonkey::function_dispatcher", G_SCALAR);
     SPAGAIN;
 
-    if(Debug)
-        fprintf(stderr, "DEBUG: Count is %d\n", count);
-
-    if( count > 0) {
-        sv = POPs;        
-        if(SvROK(sv)) {
-            /* Im getting a perl reference here, the user
-             * seems to want to send a perl object to jscript
-             * ok, we will do it, although it seems like a painful
-             * thing to me.
-             */
-
-            if(Debug)
-                fprintf(stderr, "DEBUG: %lx is a ref!\n", (long) sv);
-#if JS_VERSION < 185
-            *rval = OBJECT_TO_JSVAL(INT2PTR(JSObject *,SvIV(SvRV(sv))));
-#else
-            JS_SET_RVAL(cx,vp,OBJECT_TO_JSVAL(INT2PTR(JSObject *,SvIV(SvRV(sv)))));
-#endif
+    if (count > 0) {
+        sv = POPs;
+        if (SvROK(sv)) {
+            JSObject *retobj = INT2PTR(JSObject *, SvIV(SvRV(sv)));
+            args.rval().setObject(*retobj);
         }
-        else if(SvIOK(sv)) {
-            /* It appears that we have been sent an int return
-             * value.  Thats fine we can give javascript an int
-             */
-            n_jnum=SvIV(sv);
-            if(Debug)
-                fprintf(stderr, "DEBUG: %lx is an int (%d)\n", (long) sv,n_jnum);
-#if JS_VERSION < 185
-            *rval = INT_TO_JSVAL(n_jnum);
-#else
-            JS_SET_RVAL(cx,vp,INT_TO_JSVAL(n_jnum));
-#endif
-        } else if(SvNOK(sv)) {
-            /* It appears that we have been sent an double return
-             * value.  Thats fine we can give javascript an double
-             */
-            n_jdbl=SvNV(sv);
-
-            if(Debug) 
-                fprintf(stderr, "DEBUG: %lx is a double(%f)\n", (long) sv,n_jdbl);
-#if JS_VERSION < 185
-            *rval = DOUBLE_TO_JSVAL(JS_NewDouble(cx, n_jdbl));
-#else
-            JS_NewNumberValue(cx, n_jdbl, &rval);
-            JS_SET_RVAL(cx,vp,rval);
-#endif
-        } else if(SvPOK(sv)) {
+        else if (SvIOK(sv)) {
+            n_jnum = SvIV(sv);
+            args.rval().setInt32(n_jnum);
+        } else if (SvNOK(sv)) {
+            n_jdbl = SvNV(sv);
+            args.rval().setDouble(n_jdbl);
+        } else if (SvPOK(sv)) {
             n_jstr = SvPV(sv, PL_na);
-            //warn("DEBUG: %s (%d)\n", n_jstr);
-#if JS_VERSION < 185
-            *rval = STRING_TO_JSVAL(JS_NewStringCopyZ(cx, n_jstr));
-#else
-            JS_SET_RVAL(cx,vp,STRING_TO_JSVAL(JS_NewStringCopyZ(cx, n_jstr)));
-#endif
+            JSString *jsstr = JS_NewStringCopyZ(cx, n_jstr);
+            if (jsstr)
+                args.rval().setString(jsstr);
         }
     }
 
@@ -268,60 +384,112 @@ FunctionDispatcher(JSContext *cx, uintN argc, jsval *vp) {
     FREETMPS;
     LEAVE;
 
-    return JS_TRUE;
+    return true;
 }
 
+/* --------------------------------------------------------------------- */
+/* Warning reporter - for JS::SetWarningReporter                         */
 /* --------------------------------------------------------------------- */
 static void
-ErrorReporter(JSContext *cx, const char *message, JSErrorReport *report) {
-/* --------------------------------------------------------------------- */
-     char msg[400];
-     if (report->linebuf) {
-         int i = 0;
-         int printed = 
-             snprintf (msg, sizeof(msg), 
-                       "Error: %s at line %d: ", message, report->lineno
-                       );
-         /* Don't print the \n at the end of report->linebuf. */
-         while (printed < sizeof (msg) - 1) {
-             if (report->linebuf[i] == '\n')
-                 break;
-             msg[printed] = report->linebuf[i];
-             printed++;
-             i++;
-         }
-         msg[printed] = '\0';
-     } else {
-         /*
-           Fix for following bug (report->linebuf is null at runtime):
-           https://rt.cpan.org/Public/Bug/Display.html?id=57617
-           BKB 2010-05-24 10:12:45
-          */
-         snprintf(msg, sizeof(msg), 
-                  "Error: %s at line %d", message, report->lineno);
-     }
-     sv_setpv(get_sv("@", TRUE), msg);
+WarningReporter(JSContext *cx, JSErrorReport *report) {
+    char msg[400];
+    const char *message = report->message().c_str();
+
+    if (report->linebuf()) {
+        int i = 0;
+        int printed =
+            snprintf(msg, sizeof(msg),
+                     "Error: %s at line %d: ", message, report->lineno);
+        while (printed < (int)sizeof(msg) - 1) {
+            if (report->linebuf()[i] == '\n' || report->linebuf()[i] == '\0')
+                break;
+            msg[printed] = report->linebuf()[i];
+            printed++;
+            i++;
+        }
+        msg[printed] = '\0';
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "Error: %s at line %d", message, report->lineno);
+    }
+    sv_setpv(get_sv("@", TRUE), msg);
 }
 
 /* --------------------------------------------------------------------- */
-#if JS_VERSION < 181
-static JSBool
-BranchHandler(JSContext *cx, JSScript *script) {
-#else
-static JSBool
+/* Extract error from pending exception                                  */
+/* --------------------------------------------------------------------- */
+static void
+ReportPendingException(JSContext *cx) {
+    if (!JS_IsExceptionPending(cx))
+        return;
+
+    JS::RootedValue exc(cx);
+    if (!JS_GetPendingException(cx, &exc)) {
+        JS_ClearPendingException(cx);
+        return;
+    }
+    JS_ClearPendingException(cx);
+
+    /* If the exception is an Error object, extract its message property
+     * for a cleaner error string */
+    if (exc.isObject()) {
+        JS::RootedObject excObj(cx, &exc.toObject());
+        JS::RootedValue msgVal(cx);
+        if (JS_GetProperty(cx, excObj, "message", &msgVal)) {
+            JS::RootedString msgStr(cx, JS::ToString(cx, msgVal));
+            if (msgStr) {
+                EncodedString msg = EncodeString(cx, msgStr);
+                if (SM_ENCODED_CHARS(msg)) {
+                    /* Also try to get the line number */
+                    JS::RootedValue lineVal(cx);
+                    int lineno = 0;
+                    if (JS_GetProperty(cx, excObj, "lineNumber", &lineVal) &&
+                        lineVal.isInt32()) {
+                        lineno = lineVal.toInt32();
+                    }
+                    char buf[400];
+                    if (lineno > 0) {
+                        snprintf(buf, sizeof(buf),
+                                 "Error: %s at line %d",
+                                 SM_ENCODED_CHARS(msg), lineno);
+                    } else {
+                        snprintf(buf, sizeof(buf), "Error: %s",
+                                 SM_ENCODED_CHARS(msg));
+                    }
+                    sv_setpv(get_sv("@", TRUE), buf);
+                    SM_FREE_ENCODED(cx, msg);
+                    return;
+                }
+            }
+        }
+    }
+
+    /* Fallback: convert exception to string */
+    JS::RootedString excStr(cx, JS::ToString(cx, exc));
+    if (excStr) {
+        EncodedString msg = EncodeString(cx, excStr);
+        if (SM_ENCODED_CHARS(msg)) {
+            char buf[400];
+            snprintf(buf, sizeof(buf), "Error: %s", SM_ENCODED_CHARS(msg));
+            sv_setpv(get_sv("@", TRUE), buf);
+            SM_FREE_ENCODED(cx, msg);
+        }
+    }
+}
+
+/* --------------------------------------------------------------------- */
+static bool
 BranchHandler(JSContext *cx) {
-#endif
 /* --------------------------------------------------------------------- */
-  PJS_Context* pcx = (PJS_Context*) JS_GetContextPrivate(cx);
+    PJS_Context* pcx = (PJS_Context*) JS_GetContextPrivate(cx);
 
-  pcx->branch_count++;
-  if (pcx->branch_count > pcx->branch_max) {
-    return JS_FALSE;
-  } else {
-    return JS_TRUE;
-  }
+    pcx->branch_count++;
+    if (pcx->branch_count > pcx->branch_max) {
+        return false;
+    } else {
+        return true;
+    }
 }
-
 
 
 MODULE = JavaScript::SpiderMonkey	PACKAGE = JavaScript::SpiderMonkey
@@ -339,79 +507,53 @@ JS_GetImplementationVersion()
     RETVAL
 
 ######################################################################
-JSRuntime *
-JS_NewRuntime(maxbytes)
-        int maxbytes
-######################################################################
-    PREINIT:
-    JSRuntime *rt;
-    CODE:
-    {
-        rt = JS_NewRuntime(maxbytes);
-        if(!rt) {
-            XSRETURN_UNDEF;
-        }
-        RETVAL = rt;
-    }
-    OUTPUT:
-    RETVAL
-
-######################################################################
-int
-JS_DestroyRuntime(rt)
-        JSRuntime *rt
-######################################################################
-    CODE:
-    {
-        JS_DestroyRuntime(rt);
-        RETVAL = 0;
-    }
-    OUTPUT:
-    RETVAL
-
-######################################################################
-JSRuntime *
+JSContext *
 JS_Init(maxbytes)
         int maxbytes
-######################################################################
-    PREINIT:
-    JSRuntime *rt;
-    CODE:
-    {
-        rt = JS_Init(maxbytes);
-        if(!rt) {
-            XSRETURN_UNDEF;
-        }
-            /* Replace this by Debug = debug_enabled(); once 
-             * Log::Log4perl 0.47 is out */
-        Debug = 0;
-        RETVAL = rt;
-    }
-    OUTPUT:
-    RETVAL
-
-######################################################################
-JSContext *
-JS_NewContext(rt, stack_chunk_size)
-        JSRuntime *rt
-        int stack_chunk_size
 ######################################################################
     PREINIT:
     JSContext *cx;
     CODE:
     {
-        PJS_Context* pcx;
-        cx = JS_NewContext(rt, stack_chunk_size);
-        if(!cx) {
+        /* If a context already exists, destroy it first.
+         * mozjs only supports one context at a time. */
+        if (active_context) {
+            PJS_Context* old_pcx = (PJS_Context*) JS_GetContextPrivate(active_context);
+#if MOZJS_MAJOR_VERSION >= 78
+            if (old_pcx && old_pcx->old_realm) {
+                JS::LeaveRealm(active_context,
+                               (JS::Realm*)old_pcx->old_realm);
+                old_pcx->old_realm = nullptr;
+            }
+#endif
+            if (old_pcx)
+                Safefree(old_pcx);
+            JS_DestroyContext(active_context);
+            active_context = nullptr;
+            prop_store_clear();
+        }
+
+        if (!js_engine_initialized) {
+            if (!JS_Init()) {
+                XSRETURN_UNDEF;
+            }
+            js_engine_initialized = true;
+        }
+
+        cx = JS_NewContext(maxbytes);
+        if (!cx) {
             XSRETURN_UNDEF;
         }
-#ifdef E4X
-        JS_SetOptions(cx,JSOPTION_XML);
-#endif
+        if (!JS::InitSelfHostedCode(cx)) {
+            JS_DestroyContext(cx);
+            XSRETURN_UNDEF;
+        }
 
+        PJS_Context* pcx;
         Newz(1, pcx, 1, PJS_Context);
         JS_SetContextPrivate(cx, (void *)pcx);
 
+        active_context = cx;
         RETVAL = cx;
     }
     OUTPUT:
@@ -424,8 +566,22 @@ JS_DestroyContext(cx)
 ######################################################################
     CODE:
     {
-        JS_DestroyContext(cx);
-        Safefree(JS_GetContextPrivate(cx));
+        /* Guard: only destroy if this is still the active context.
+         * It may have been auto-destroyed by a subsequent JS_Init call. */
+        if (cx == active_context) {
+            PJS_Context* pcx = (PJS_Context*) JS_GetContextPrivate(cx);
+#if MOZJS_MAJOR_VERSION >= 78
+            if (pcx && pcx->old_realm) {
+                JS::LeaveRealm(cx, (JS::Realm*)pcx->old_realm);
+                pcx->old_realm = nullptr;
+            }
+#endif
+            if (pcx)
+                Safefree(pcx);
+            JS_DestroyContext(cx);
+            active_context = nullptr;
+            prop_store_clear();
+        }
         RETVAL = 0;
     }
     OUTPUT:
@@ -433,94 +589,54 @@ JS_DestroyContext(cx)
 
 ######################################################################
 JSObject *
-JS_NewObject(cx, class, proto, parent)
+JS_NewObject(cx, clasp)
     JSContext * cx
-    JSClass   * class
-    JSObject  * proto
-    JSObject  * parent
+    JSClass   * clasp
 ######################################################################
     PREINIT:
     JSObject *obj;
     CODE:
     {
-#ifdef JS_THREADSAFE
-        JS_BeginRequest(cx);
-#endif
-        obj = JS_NewObject(cx, class, NULL, NULL);
-        if(!obj) {
+        obj = JS_NewObject(cx, clasp);
+        if (!obj) {
             XSRETURN_UNDEF;
         }
         RETVAL = obj;
-#ifdef JS_THREADSAFE
-        JS_EndRequest(cx);
-#endif
     }
     OUTPUT:
     RETVAL
 
 ######################################################################
 JSObject *
-JS_NewCompartmentAndGlobalObject(cx, class)
+JS_NewGlobalObject(cx, clasp)
     JSContext * cx
-    JSClass   * class
+    JSClass   * clasp
 ######################################################################
     PREINIT:
     JSObject *obj;
     CODE:
     {
-#ifdef JS_THREADSAFE
-        JS_BeginRequest(cx);
-#endif
-#if JS_VERSION < 185
-        obj = JS_NewObject(cx, class, NULL, NULL);
+#if MOZJS_MAJOR_VERSION >= 78
+        JS::RealmOptions options;
+        obj = JS_NewGlobalObject(cx, clasp, nullptr,
+                                 JS::FireOnNewGlobalHook, options);
+        if (!obj) {
+            XSRETURN_UNDEF;
+        }
+        /* Enter the realm of the global object */
+        PJS_Context *pcx = (PJS_Context*) JS_GetContextPrivate(cx);
+        pcx->old_realm = JS::EnterRealm(cx, obj);
 #else
-        obj = JS_NewCompartmentAndGlobalObject(cx, class, NULL);
-#endif
-        if(!obj) {
+        JS::CompartmentOptions options;
+        obj = JS_NewGlobalObject(cx, clasp, nullptr,
+                                 JS::FireOnNewGlobalHook, options);
+        if (!obj) {
             XSRETURN_UNDEF;
         }
+        /* Enter the compartment of the global object */
+        JS_EnterCompartment(cx, obj);
+#endif
         RETVAL = obj;
-#ifdef JS_THREADSAFE
-        JS_EndRequest(cx);
-#endif
-    }
-    OUTPUT:
-    RETVAL
-
-######################################################################
-JSObject *
-JS_InitClass(cx, iobj, parent_proto, clasp, constructor, nargs, ps, fs, static_ps, static_fs)
-    JSContext * cx
-    JSObject *iobj
-    JSObject *parent_proto
-    JSClass *clasp
-    JSNative constructor
-    int nargs
-    JSPropertySpec *ps
-    JSFunctionSpec *fs
-    JSPropertySpec *static_ps
-    JSFunctionSpec *static_fs
-######################################################################
-    PREINIT:
-    JSObject *obj;
-    uintN     na;
-    INIT:
-    na = (uintN) nargs;
-    CODE:
-    {
-#ifdef JS_THREADSAFE
-        JS_BeginRequest(cx);
-#endif
-        obj = JS_InitClass(cx, iobj, parent_proto, clasp,
-                           constructor, nargs, ps, fs, static_ps,
-                           static_fs);
-        if(!obj) {
-            XSRETURN_UNDEF;
-        }
-        RETVAL = obj;
-#ifdef JS_THREADSAFE
-        JS_EndRequest(cx);
-#endif
     }
     OUTPUT:
     RETVAL
@@ -544,27 +660,34 @@ int
 JS_EvaluateScript(cx, gobj, script, length, filename, lineno)
     JSContext  * cx
     JSObject   * gobj
-    char       * script 
+    char       * script
     int          length
     char       * filename
     int          lineno
 ######################################################################
     PREINIT:
-    uintN len;
-    uintN ln;
-    int    rc;
-    jsval  jsval;
-    INIT:
-    len = (uintN) length;
-    ln  = (uintN) lineno;
+    bool rc;
     CODE:
     {
-        rc = JS_EvaluateScript(cx, gobj, script, len, filename,
-                               ln, &jsval);
-        if(!rc) {
+        JS::CompileOptions opts(cx);
+        opts.setFileAndLine(filename, lineno);
+
+        JS::RootedValue rval(cx);
+#if MOZJS_MAJOR_VERSION >= 78
+        JS::SourceText<mozilla::Utf8Unit> srcBuf;
+        if (!srcBuf.init(cx, script, (size_t)length,
+                         JS::SourceOwnership::Borrowed))
+            XSRETURN_UNDEF;
+        rc = JS::Evaluate(cx, opts, srcBuf, &rval);
+#else
+        rc = JS::Evaluate(cx, opts, script, (size_t)length, &rval);
+#endif
+
+        if (!rc) {
+            ReportPendingException(cx);
             XSRETURN_UNDEF;
         }
-        RETVAL = rc;
+        RETVAL = 1;
     }
     OUTPUT:
     RETVAL
@@ -576,20 +699,19 @@ JS_InitStandardClasses(cx, gobj)
     JSObject   * gobj
 ######################################################################
     PREINIT:
-    JSBool rc;
+    bool rc;
     CODE:
     {
-#ifdef JS_THREADSAFE
-        JS_BeginRequest(cx);
+#if MOZJS_MAJOR_VERSION >= 78
+        rc = JS::InitRealmStandardClasses(cx);
+#else
+        JS::RootedObject rgobj(cx, gobj);
+        rc = JS_InitStandardClasses(cx, rgobj);
 #endif
-        rc = JS_InitStandardClasses(cx, gobj);
-        if(!rc) {
+        if (!rc) {
             XSRETURN_UNDEF;
         }
-        RETVAL = (int) rc;
-#ifdef JS_THREADSAFE
-        JS_BeginRequest(cx);
-#endif
+        RETVAL = 1;
     }
     OUTPUT:
     RETVAL
@@ -607,13 +729,14 @@ JS_DefineFunction(cx, obj, name, nargs, flags)
     JSFunction *rc;
     CODE:
     {
-        rc = JS_DefineFunction(cx, obj,
+        JS::RootedObject robj(cx, obj);
+        rc = JS_DefineFunction(cx, robj,
              (const char *) name, FunctionDispatcher,
-             (uintN) nargs, (uintN) flags);
-        if(!rc) {
+             (unsigned) nargs, (unsigned) flags);
+        if (!rc) {
             XSRETURN_UNDEF;
         }
-        RETVAL = (int) rc;
+        RETVAL = 1;
     }
     OUTPUT:
     RETVAL
@@ -625,7 +748,7 @@ JS_SetErrorReporter(cx)
 ######################################################################
     CODE:
     {
-        JS_SetErrorReporter(cx, ErrorReporter);
+        JS::SetWarningReporter(cx, WarningReporter);
         RETVAL = 0;
     }
     OUTPUT:
@@ -633,18 +756,33 @@ JS_SetErrorReporter(cx)
 
 ######################################################################
 JSObject *
-JS_DefineObject(cx, obj, name, class, proto)
+JS_DefineObject(cx, obj, name, clasp, proto)
     JSContext  * cx
     JSObject   * obj
     char       * name
-    JSClass    * class
+    JSClass    * clasp
     JSObject   * proto
 ######################################################################
     PREINIT:
-    SV       *sv = sv_newmortal();
+    JSObject *newobj;
     CODE:
     {
-        RETVAL = JS_DefineObject(cx, obj, name, class, proto, 0);
+        JS::RootedObject robj(cx, obj);
+        JS::RootedObject rproto(cx, proto);
+
+        /* Create object with given prototype */
+        newobj = JS_NewObjectWithGivenProto(cx, clasp, rproto);
+        if (!newobj) {
+            XSRETURN_UNDEF;
+        }
+
+        /* Define it as a property on the parent object */
+        JS::RootedValue val(cx, JS::ObjectValue(*newobj));
+        if (!JS_DefineProperty(cx, robj, name, val, JSPROP_ENUMERATE)) {
+            XSRETURN_UNDEF;
+        }
+
+        RETVAL = newobj;
     }
     OUTPUT:
     RETVAL
@@ -654,27 +792,58 @@ int
 JS_DefineProperty(cx, obj, name, value)
     JSContext   * cx
     JSObject    * obj
-    char        * name 
+    char        * name
     char        * value
-    #JSPropertyOp  getter
-    #JSPropertyOp  setter
-    #uintN         flags
 ######################################################################
     PREINIT:
-    JSBool rc;
-    JSString *str;
+    bool rc;
     CODE:
     {
-        str = JS_NewStringCopyZ(cx, value); 
+        JS::RootedObject robj(cx, obj);
+        JS::RootedString str(cx, JS_NewStringCopyZ(cx, value));
+        JS::RootedValue val(cx, JS::StringValue(str));
+        rc = JS_DefineProperty(cx, robj, name, val, JSPROP_ENUMERATE);
+        RETVAL = (int) rc;
+    }
+    OUTPUT:
+    RETVAL
 
-        /* This implementation is somewhat sub-optimal, since it
-         * calls back into perl even if no getters/setters have
-         * been defined. The necessity for a callback is determined
-         * at the perl level, where there's a data structure mapping
-         * out each object's properties and their getter/setter settings.
-         */
-        rc = JS_DefineProperty(cx, obj, name, STRING_TO_JSVAL(str), 
-                               getter_dispatcher, setter_dispatcher, 0);
+######################################################################
+int
+JS_DefinePropertyWithAccessors(cx, obj, name, value)
+    JSContext   * cx
+    JSObject    * obj
+    char        * name
+    char        * value
+######################################################################
+    PREINIT:
+    bool rc;
+    CODE:
+    {
+        JS::RootedObject robj(cx, obj);
+
+        /* Store initial value in our property store */
+        prop_store_set((void*)obj, name, value);
+
+        /* Define as accessor property with getter/setter interceptors */
+#if MOZJS_MAJOR_VERSION >= 78
+        /* Use the JSNative overload; getter_native/setter_native retrieve
+         * the property name from the callee function created by
+         * JS_NewFunction with the property name embedded. */
+        JSFunction *getterFn = JS_NewFunction(cx, getter_native, 0, 0, name);
+        if (!getterFn) XSRETURN_UNDEF;
+        JSFunction *setterFn = JS_NewFunction(cx, setter_native, 1, 0, name);
+        if (!setterFn) XSRETURN_UNDEF;
+        JS::RootedObject rgetterObj(cx, JS_GetFunctionObject(getterFn));
+        JS::RootedObject rsetterObj(cx, JS_GetFunctionObject(setterFn));
+        rc = JS_DefineProperty(cx, robj, name, rgetterObj, rsetterObj,
+                               JSPROP_ENUMERATE | JSPROP_GETTER | JSPROP_SETTER);
+#else
+        rc = JS_DefineProperty(cx, robj, name,
+                               JS_PROPERTYOP_GETTER(getter_dispatcher),
+                               JS_PROPERTYOP_SETTER(setter_dispatcher),
+                               JSPROP_ENUMERATE | JSPROP_PROPOP_ACCESSORS);
+#endif
         RETVAL = (int) rc;
     }
     OUTPUT:
@@ -685,31 +854,32 @@ void
 JS_GetProperty(cx, obj, name)
     JSContext   * cx
     JSObject    * obj
-    char        * name 
+    char        * name
 ######################################################################
     PREINIT:
-    JSBool rc;
-    jsval  vp;
-    JSString *str;
-    SV       *sv = sv_newmortal();
+    bool rc;
+    SV   *sv = sv_newmortal();
     PPCODE:
     {
-        rc = JS_TRUE;
-        rc = JS_GetProperty(cx, obj, name, &vp);
-        if(rc) {
-            str = JS_ValueToString(cx, vp);
-#if JS_VERSION < 185
-            if(strcmp(JS_GetStringBytes(str), "undefined") == 0) {
-#else
-            if(strcmp(JS_EncodeString(cx, str), "undefined") == 0) {
-#endif
-                sv = &PL_sv_undef;
+        JS::RootedObject robj(cx, obj);
+        JS::RootedValue vp(cx);
+        rc = JS_GetProperty(cx, robj, name, &vp);
+        if (rc) {
+            JS::RootedString str(cx, JS::ToString(cx, vp));
+            if (str) {
+                EncodedString encoded = EncodeString(cx, str);
+                if (SM_ENCODED_CHARS(encoded)) {
+                    if (strcmp(SM_ENCODED_CHARS(encoded), "undefined") == 0) {
+                        sv = &PL_sv_undef;
+                    } else {
+                        sv_setpv(sv, SM_ENCODED_CHARS(encoded));
+                    }
+                    SM_FREE_ENCODED(cx, encoded);
+                } else {
+                    sv = &PL_sv_undef;
+                }
             } else {
-#if JS_VERSION < 185
-                sv_setpv(sv, JS_GetStringBytes(str));
-#else
-                sv_setpv(sv, JS_EncodeString(cx, str));
-#endif
+                sv = &PL_sv_undef;
             }
         } else {
             sv = &PL_sv_undef;
@@ -726,7 +896,11 @@ JS_NewArrayObject(cx)
     JSObject *rc;
     CODE:
     {
-        rc = JS_NewArrayObject(cx, 0, NULL);
+#if MOZJS_MAJOR_VERSION >= 78
+        rc = JS::NewArrayObject(cx, (size_t)0);
+#else
+        rc = JS_NewArrayObject(cx, (size_t)0);
+#endif
         RETVAL = rc;
     }
     OUTPUT:
@@ -741,19 +915,14 @@ JS_SetElement(cx, obj, idx, valptr)
     char       *valptr
 ######################################################################
     PREINIT:
-    JSBool rc;
-    JSString  *str;
-    jsval val;
+    bool rc;
     CODE:
     {
-        str = JS_NewStringCopyZ(cx, valptr);
-        val = STRING_TO_JSVAL(str); 
-        rc = JS_SetElement(cx, obj, idx, &val);
-        if(rc) {
-            RETVAL = 1;
-        } else {
-            RETVAL = 0;
-        }
+        JS::RootedObject robj(cx, obj);
+        JS::RootedString str(cx, JS_NewStringCopyZ(cx, valptr));
+        JS::RootedValue val(cx, JS::StringValue(str));
+        rc = JS_SetElement(cx, robj, (uint32_t)idx, val);
+        RETVAL = rc ? 1 : 0;
     }
     OUTPUT:
     RETVAL
@@ -767,17 +936,13 @@ JS_SetElementAsObject(cx, obj, idx, elobj)
     JSObject   *elobj
 ######################################################################
     PREINIT:
-    JSBool rc;
-    jsval val;
+    bool rc;
     CODE:
     {
-        val = OBJECT_TO_JSVAL(elobj); 
-        rc = JS_SetElement(cx, obj, idx, &val);
-        if(rc) {
-            RETVAL = 1;
-        } else {
-            RETVAL = 0;
-        }
+        JS::RootedObject robj(cx, obj);
+        JS::RootedValue val(cx, JS::ObjectValue(*elobj));
+        rc = JS_SetElement(cx, robj, (uint32_t)idx, val);
+        RETVAL = rc ? 1 : 0;
     }
     OUTPUT:
     RETVAL
@@ -790,27 +955,29 @@ JS_GetElement(cx, obj, idx)
     int         idx
 ######################################################################
     PREINIT:
-    JSBool rc;
-    jsval  vp;
-    JSString *str;
-    SV       *sv = sv_newmortal();
+    bool rc;
+    SV   *sv = sv_newmortal();
     PPCODE:
     {
-        rc = JS_GetElement(cx, obj, idx, &vp);
-        if(rc) {
-            str = JS_ValueToString(cx, vp);
-#if JS_VERSION < 185
-            if(strcmp(JS_GetStringBytes(str), "undefined") == 0) {
-#else
-            if(strcmp(JS_EncodeString(cx, str), "undefined") == 0) {
-#endif
-                sv = &PL_sv_undef;
+        JS::RootedObject robj(cx, obj);
+        JS::RootedValue vp(cx);
+        rc = JS_GetElement(cx, robj, (uint32_t)idx, &vp);
+        if (rc) {
+            JS::RootedString str(cx, JS::ToString(cx, vp));
+            if (str) {
+                EncodedString encoded = EncodeString(cx, str);
+                if (SM_ENCODED_CHARS(encoded)) {
+                    if (strcmp(SM_ENCODED_CHARS(encoded), "undefined") == 0) {
+                        sv = &PL_sv_undef;
+                    } else {
+                        sv_setpv(sv, SM_ENCODED_CHARS(encoded));
+                    }
+                    SM_FREE_ENCODED(cx, encoded);
+                } else {
+                    sv = &PL_sv_undef;
+                }
             } else {
-#if JS_VERSION < 185
-                sv_setpv(sv, JS_GetStringBytes(str));
-#else
-                sv_setpv(sv, JS_EncodeString(cx, str));
-#endif
+                sv = &PL_sv_undef;
             }
         } else {
             sv = &PL_sv_undef;
@@ -820,20 +987,15 @@ JS_GetElement(cx, obj, idx)
 
 ######################################################################
 JSClass *
-JS_GetClass(cx, obj)
-    JSContext  * cx
+JS_GetClass(obj)
     JSObject  * obj
 ######################################################################
     PREINIT:
-    JSClass *rc;
+    const JSClass *rc;
     CODE:
     {
-#ifdef JS_THREADSAFE
-        rc = JS_GetClass(cx, obj);
-#else
         rc = JS_GetClass(obj);
-#endif
-        RETVAL = rc;
+        RETVAL = (JSClass *)rc;
     }
     OUTPUT:
     RETVAL
@@ -850,14 +1012,9 @@ JS_SetMaxBranchOperations(cx, max_branch_operations)
         PJS_Context* pcx = (PJS_Context *) JS_GetContextPrivate(cx);
         pcx->branch_count = 0;
         pcx->branch_max = max_branch_operations;
-#if JS_VERSION < 181
-        JS_SetBranchCallback(cx, BranchHandler);
-#else
-        JS_SetOperationCallback(cx, BranchHandler);
-#endif
+        JS_AddInterruptCallback(cx, BranchHandler);
     }
     OUTPUT:
 
 
 ######################################################################
-

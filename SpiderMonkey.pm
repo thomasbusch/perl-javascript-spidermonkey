@@ -2,7 +2,7 @@
 package JavaScript::SpiderMonkey;
 ######################################################################
 # Authors: Mike Schilli  m@perlmeister.com, 2002-2005
-#          Thomas Busch  tbusch@cpan.org, 2006-2018
+#          Thomas Busch  tbusch@cpan.org, 2006-2026
 ######################################################################
 
 =head1 NAME
@@ -15,7 +15,7 @@ JavaScript::SpiderMonkey - Perl interface to the JavaScript Engine
 
     my $js = JavaScript::SpiderMonkey->new();
 
-    $js->init();  # Initialize Runtime/Context
+    $js->init();  # Initialize engine
 
                   # Define a perl callback for a new JavaScript function
     $js->function_set("print_to_perl", sub { print "@_\n"; });
@@ -41,16 +41,27 @@ JavaScript::SpiderMonkey - Perl interface to the JavaScript Engine
 
 =head1 INSTALL
 
-JavaScript::SpiderMonkey requires Mozilla's readily compiled
-SpiderMonkey 1.5 distribution or better. Please check
-L<SpiderMonkey Installation>.
+JavaScript::SpiderMonkey requires the mozjs60 (SpiderMonkey 60) library.
+On RPM-based systems such as Rocky Linux, CentOS, or Fedora, install
+the development package:
+
+    sudo dnf install mozjs60-devel
+
+Then build in the standard way:
+
+    perl Makefile.PL
+    make
+    make test
+    make install
+
+The build system uses C<pkg-config> to locate the mozjs-60 headers and
+libraries automatically.
 
 =head1 DESCRIPTION
 
-JavaScript::SpiderMonkey is a Perl Interface to the
-SpiderMonkey JavaScript Engine. It is different from 
-Claes Jacobsson's C<JavaScript.pm> in that it offers two
-different levels of access:
+JavaScript::SpiderMonkey is a Perl interface to the Mozilla
+SpiderMonkey JavaScript engine (mozjs60). It offers two levels of
+access:
 
 =over 4
 
@@ -71,13 +82,13 @@ This document describes [2], for [1], please check C<SpiderMonkey.xs>.
 use 5.006;
 use strict;
 use warnings;
-use Data::Dumper;
-use Log::Log4perl qw(:easy);
+use bytes ();
+
 
 require Exporter;
 require DynaLoader;
 
-our $VERSION     = '0.25';
+our $VERSION     = '0.26';
 our @ISA         = qw(Exporter DynaLoader);
 our %EXPORT_TAGS = ( 'all' => [ qw() ] );
 our @EXPORT_OK   = ( @{ $EXPORT_TAGS{'all'} } );
@@ -92,7 +103,7 @@ our $GLOBAL;
 =head2 new()
 
 C<$js = JavaScript::SpiderMonkey-E<gt>new()> creates a new object to work with.
-To initialize the JS runtime, call C<$js-E<gt>init()> afterwards.
+To initialize the JS engine, call C<$js-E<gt>init()> afterwards.
 
 =cut
 
@@ -102,7 +113,6 @@ sub new {
     my ($class) = @_;
 
     my $self = {
-        'runtime'       => undef,
         'context'       => undef,
         'global_object' => undef,
         'global_class'  => undef,
@@ -122,7 +132,9 @@ sub new {
 
 =head2 $js-E<gt>destroy()
 
-C<$js-E<gt>destroy()> destroys the current runtime and frees up all memory.
+C<$js-E<gt>destroy()> destroys the current JS context and frees up all
+associated memory. This is called automatically when the object goes out
+of scope, but can be called explicitly if desired.
 
 =cut
 
@@ -130,16 +142,34 @@ C<$js-E<gt>destroy()> destroys the current runtime and frees up all memory.
 sub destroy {
 ##################################################
     my ($self) = @_;
-    JavaScript::SpiderMonkey::JS_DestroyContext($self->{context});
-    JavaScript::SpiderMonkey::JS_DestroyRuntime($self->{runtime});
+    if ($self->{context}) {
+        JavaScript::SpiderMonkey::JS_DestroyContext($self->{context});
+        $self->{context} = undef;
+    }
+    $self->{global_object} = undef;
+    $self->{global_class}  = undef;
+    $self->{objects}       = {};
+    $self->{functions}     = {};
+    $self->{properties}    = {};
+}
+
+##################################################
+sub DESTROY {
+##################################################
+    my ($self) = @_;
+    $self->destroy() if $self->{context};
 }
 
 ##################################################
 
 =head2 $js-E<gt>init()
 
-C<$js-E<gt>init()> initializes the SpiderMonkey engine by creating a context,
-default classes and objects and adding an error reporter.
+C<$js-E<gt>init()> initializes the SpiderMonkey engine by creating a JS
+context, the global object, standard classes, and an error reporter.
+
+B<Note:> mozjs60 supports only one active JS context at a time. Calling
+C<init()> on a new object will automatically destroy any previously
+active context.
 
 =cut
 
@@ -148,20 +178,15 @@ sub init {
 ##################################################
     my ($self) = @_;
 
-# Changed JS_Init to JS_NewRuntime. See bug report
-# https://rt.cpan.org/Public/Bug/Display.html?id=48852
-# BKB 2010-05-24 10:04:09
-    $self->{runtime} = 
-        JavaScript::SpiderMonkey::JS_NewRuntime(1000000);
-    $self->{context} = 
-        JavaScript::SpiderMonkey::JS_NewContext($self->{runtime}, 8192);
-    $self->{global_class} = 
+    $self->{context} =
+        JavaScript::SpiderMonkey::JS_Init(1000000);
+    $self->{global_class} =
         JavaScript::SpiderMonkey::JS_GlobalClass();
-    $self->{global_object} = 
-        JavaScript::SpiderMonkey::JS_NewCompartmentAndGlobalObject(
-            $self->{context}, $self->{global_class}); 
+    $self->{global_object} =
+        JavaScript::SpiderMonkey::JS_NewGlobalObject(
+            $self->{context}, $self->{global_class});
 
-    JavaScript::SpiderMonkey::JS_InitStandardClasses($self->{context}, 
+    JavaScript::SpiderMonkey::JS_InitStandardClasses($self->{context},
                                                      $self->{global_object});
     JavaScript::SpiderMonkey::JS_SetErrorReporter($self->{context});
 }
@@ -171,7 +196,7 @@ sub init {
 =head2 $js-E<gt>array_by_path($name)
 
 Creates an object of type I<Array>
-in the JS runtime:
+in the JS engine:
 
     $js->array_by_path("document.form");
 
@@ -232,8 +257,6 @@ sub function_dispatcher {
 ##################################################
     my ($obj, $name, @args) = @_;
 
-    DEBUG "Dispatching function $obj-$name-@args";
-
     our $GLOBAL;
 
        ## Find the path for this object.
@@ -241,22 +264,17 @@ sub function_dispatcher {
        foreach( keys( %{$GLOBAL->{objects}} ) ){
            if( ${$GLOBAL->{objects}->{$_}} eq $obj &&
                    exists( $GLOBAL->{functions}->{$obj}->{$name}  ) ){
-                   DEBUG "Function found";
                    $found = 1;
                }
        }
        $obj = ${$GLOBAL->{global_object}} unless $found;
 
     if(! exists $GLOBAL->{functions}->{$obj}->{$name}) {
-        LOGDIE "Dispatcher: Can't find mapping for function $obj" .
-               ${$GLOBAL->{global_object}} . " '$name'";
+        die "Dispatcher: Can't find mapping for function $obj" .
+            ${$GLOBAL->{global_object}} . " '$name'";
     }
 
-    my $val = $GLOBAL->{functions}->{$obj}->{$name}->(@args);
-
-    DEBUG "retval=$val";
-
-    return $val;
+    return $GLOBAL->{functions}->{$obj}->{$name}->(@args);
 }
 
 ##################################################
@@ -266,18 +284,10 @@ sub getsetter_dispatcher {
 
     our $GLOBAL;
 
-    DEBUG "Dispatcher obj=$obj";
-    DEBUG "prop=$propname what=$what value=$value";
-
-    DEBUG "GETTING properties/$obj/$propname/$what";
-
     if(exists $GLOBAL->{properties}->{$obj}->{$propname}->{$what}) {
         my $entry = $GLOBAL->{properties}->{$obj}->{$propname}->{$what};
         my $path = $entry->{path};
-        DEBUG "DISPATCHING for object $path ($what)";
         $entry->{callback}->($path, $value);
-    } else {
-        DEBUG "properties/$obj/$propname/$what doesn't exist";
     }
 }
 
@@ -297,7 +307,6 @@ sub array_set_element {
 ##################################################
     my ($self, $obj, $idx, $val) = @_;
 
-    DEBUG "Setting $idx of $obj ($self->{context}) to $val";
     JavaScript::SpiderMonkey::JS_SetElement(
                     $self->{context}, $obj, $idx, $val);
 }
@@ -336,13 +345,8 @@ sub array_get_element {
 ##################################################
     my ($self, $obj, $idx) = @_;
 
-    my $rc = JavaScript::SpiderMonkey::JS_GetElement(
+    return JavaScript::SpiderMonkey::JS_GetElement(
                     $self->{context}, $obj, $idx);
-
-    DEBUG("Getting $idx of $obj ($self->{context}): ", 
-          ($rc || "undef"));
-
-    return $rc;
 }
 
 ##################################################
@@ -388,27 +392,26 @@ sub property_by_path {
 ##################################################
     my ($self, $path, $value, $getter, $setter) = @_;
 
-    DEBUG "Retrieve/Create property $path";
-
     (my $opath = $path) =~ s/\.[^.]+$//;
     my $obj = $self->object_by_path($opath);
     unless(defined $obj) {
-        LOGWARN "No object pointer found to $opath";
+        warn "No object pointer found to $opath";
         return undef;
     }
 
-    DEBUG "$opath: obj=$obj";
-
     $value = 'undef' unless defined $value;
-
-    DEBUG "Define property $self->{context}, $obj, $path, $value";
 
     (my $property = $path) =~ s/.*\.//;
 
-    my $prop = JavaScript::SpiderMonkey::JS_DefineProperty(
-        $self->{context}, $obj, $property, $value);
+    my $prop;
+    if ($getter || $setter) {
+        $prop = JavaScript::SpiderMonkey::JS_DefinePropertyWithAccessors(
+            $self->{context}, $obj, $property, $value);
+    } else {
+        $prop = JavaScript::SpiderMonkey::JS_DefineProperty(
+            $self->{context}, $obj, $property, $value);
+    }
 
-    DEBUG "SETTING properties/$$obj/$property/getter";
     if($getter) {
             # Store it under the original C pointer's value. We get
             # back a PTRREF from JS_DefineObject, but we need the
@@ -443,11 +446,6 @@ sub object_by_path {
 ##################################################
     my ($self, $path, $newobj) = @_;
 
-    DEBUG "Retrieve/Create object $path";
-
-    DEBUG "Got a ", defined $newobj ? "predefined" : "undefined",
-          " object";
-
     my $obj = $self->{global_object};
 
     my @parts = split /\./, $path;
@@ -462,14 +460,12 @@ sub object_by_path {
 
         if(exists $self->{objects}->{$full}) {
             $obj = $self->{objects}->{$full};
-            DEBUG "Object $full exists: $obj";
         } else {
             my $gobj = $self->{global_object};
             if(defined $newobj and $path eq $full) {
-                DEBUG "Setting $path to predefined object";
                 $obj = JavaScript::SpiderMonkey::JS_DefineObject(
-                       $self->{context}, $obj, $part, 
-                       JavaScript::SpiderMonkey::JS_GetClass($self->{context}, $newobj), 
+                       $self->{context}, $obj, $part,
+                       JavaScript::SpiderMonkey::JS_GetClass($newobj),
                        $newobj);
             } else {
                 $obj = JavaScript::SpiderMonkey::JS_DefineObject(
@@ -477,7 +473,6 @@ sub object_by_path {
                        $self->{global_class}, $self->{global_object});
             }
             $self->{objects}->{$full} = $obj;
-            DEBUG "Object $full created: $obj";
         }
     }
 
@@ -502,11 +497,9 @@ sub property_get {
     my($path, $property) = ($string =~ /(.*)\.([^\.]+)$/);
 
     if(!exists $self->{objects}->{$path}) {
-        LOGWARN "Cannot find object $path via SpiderMonkey";
+        warn "Cannot find object $path via SpiderMonkey";
         return;
     }
-        
-    DEBUG "Get property $self->{objects}->{$path}, $property";
 
     return JavaScript::SpiderMonkey::JS_GetProperty(
         $self->{context}, $self->{objects}->{$path}, 
@@ -524,9 +517,9 @@ and the like.
 
     my $rc = $js->eval("write('hello');");
 
-The method returns C<1> on success or else if
-there was an error in JS land. In case of an error, the JS
-error text will be available in C<$@>.
+The method returns C<1> on success or C<undef> if there was an error
+in JS land. In case of an error, the error text will be available in
+C<$@>.
 
 =cut
 
@@ -568,95 +561,28 @@ sub set_max_branch_operations {
     JavaScript::SpiderMonkey::JS_SetMaxBranchOperations($self->{context}, $max_branch_operations);
 }
 
-##################################################
-sub dump {
-##################################################
-    my ($self) = @_;
-
-    Data::Dumper::Dumper($self->{objects});
-}
-
-##################################################
-sub debug_enabled {
-##################################################
-    my $logger = Log::Log4perl::get_logger("JavaScript::SpiderMonkey");
-    if(Log::Log4perl->initialized() and $logger->is_debug()) {
-        # print "DEBUG IS ENABLED\n";
-        return 1;
-    } else {
-        # print "DEBUG IS DISABLED\n";
-        return 0;
-    }
-}
-
 1;
 
 __END__
 
-=head1 SpiderMonkey Installation
+=head1 LIMITATIONS
 
-First, get the latest SpiderMonkey distribution from mozilla.org:
-http://www.mozilla.org/js/spidermonkey shows which releases are available.
-C<js-1.6.tar.gz> has been proven to work.
+=over 4
 
-Untar it at the same directory level as you just untarred the 
-C<JavaScript::SpiderMonkey> distribution you're currently reading.
-So, if you're currently in C</my/path/JavaScript-SpiderMonkey-v.vv>, do
-this:
+=item *
 
-    cp js-1.6.tar.gz /my/path
-    cd /my/path
-    tar zxfv js-1.6.tar.gz
+B<Single instance only.> mozjs60 supports only one active JS context at
+a time. You may create multiple C<JavaScript::SpiderMonkey> objects, but
+calling C<init()> on a new one will automatically destroy the previous
+context. Design your application around a single active instance.
 
-Then, compile the SpiderMonkey distribution, if you're on Linux, 
-just use:
+=item *
 
-    cd js/src
-    make -f Makefile.ref
+B<Not thread-safe.> The module uses global state internally (function
+and property dispatch tables) and should only be used from a single
+thread.
 
-It's important that the js and JavaScript-SpiderMonkey-v.vv directories
-are at the same level:
-
-    [/my/path]$ ls
-    JavaScript-SpiderMonkey-v.vv
-    js
-    js-1.6.tar.gz
-    [/my/path]$
-
-(Note that you *can* untar the SpiderMonkey distribution elsewhere,
-but, if so, then you need to edit the setting of $JSLIBPATH in Makefile.PL).
-
-Next, you need to copy the shared library file thus constructed
-(e.g., libjs.so or js32.dll) to an appropriate directory on your library path.
-On Windows, this can also be the directory where the perl executable 
-lives. On Unix, this has been shown to work without copying, but this way
-you need to keep the compiled binary in the C<js> build directory forever. 
-Copying
-C<js/src/Your_OS_DBG.OBJ/libjs.so> to C</usr/local/lib> and
-making sure that C</usr/local/lib> is in your C<LD_LIBRARY_PATH>
-seems to be safest bet.
-
-Now, build JavaScript::SpiderMonkey in the standard way:
-
-    cd JavaScript-SpiderMonkey-v.vv
-    perl Makefile.PL
-    make
-    make test
-    make install
-
-=head1 E4X SUPPORT
-
-To build JavaScript-SpiderMonkey with E4X (ECMAScript for XML) support:
-
-    perl Makefile.PL -E4X
-
-Please note that E4X support is only supported since SpiderMonkey release 1.6.
-
-=head1 THREAD SAFETY
-
-To build JavaScript-SpiderMonkey when using a thread safe version of SpiderMonkey:
-
-   perl Makefile.PL -JS_THREADSAFE
+=back
 
 =head1 AUTHORS
 
@@ -666,7 +592,7 @@ To build JavaScript-SpiderMonkey when using a thread safe version of SpiderMonke
 =head1 COPYRIGHT AND LICENSE
 
   Copyright (c) 2002-2005 Mike Schilli
-  Copyright (c) 2006-2018 Thomas Busch
+  Copyright (c) 2006-2026 Thomas Busch
 
 This library is free software; you can redistribute it and/or modify
-it under the same terms as Perl itself. 
+it under the same terms as Perl itself.
